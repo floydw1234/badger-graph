@@ -1096,63 +1096,118 @@ def clear(
     
     client = DgraphClient(endpoint)
     try:
-        # Delete all nodes by querying all and deleting
-        # First, get all UIDs
-        query = """
-        {
-            files: queryFile { id }
-            functions: queryFunction { id }
-            classes: queryClass { id }
-            imports: queryImport { id }
-            macros: queryMacro { id }
-            variables: queryVariable { id }
-            typedefs: queryTypedef { id }
-            structFieldAccesses: queryStructFieldAccess { id }
-        }
-        """
+        # Use drop_all to clear everything (schema and data)
+        # This is much faster and more robust than deleting nodes individually
+        import pydgraph
+        op = pydgraph.Operation(drop_all=True)
+        client.client.alter(op)
         
-        result = client.execute_graphql_query(query)
+        console.print(f"[green]✓ Successfully dropped all data and schema.[/green]")
         
-        # Collect all UIDs
-        uids_to_delete = []
-        for node_type in ["files", "functions", "classes", "imports", "macros", "variables", "typedefs", "structFieldAccesses"]:
-            nodes = result.get(node_type, [])
-            for node in nodes:
-                if isinstance(node, dict) and "id" in node:
-                    uids_to_delete.append(node["id"])
-        
-        if not uids_to_delete:
-            console.print("[yellow]No data found to delete.[/yellow]")
-            return
-        
-        console.print(f"[dim]Found {len(uids_to_delete)} nodes to delete...[/dim]")
-        
-        # Delete in batches
-        batch_size = 1000
-        deleted = 0
-        for i in range(0, len(uids_to_delete), batch_size):
-            batch = uids_to_delete[i:i + batch_size]
-            delete_data = [{"uid": uid} for uid in batch]
+        # Re-initialize schema since drop_all removes it
+        console.print("[cyan]Re-initializing GraphQL schema...[/cyan]")
+        if client.setup_graphql_schema():
+            console.print("[green]✓ GraphQL schema setup complete[/green]")
+        else:
+            console.print("[yellow]⚠ Schema setup may have failed. Run 'badger init_graph' if needed.[/yellow]")
             
-            txn = client.client.txn()
-            try:
-                delete_mutation = txn.create_mutation(del_obj=delete_data)
-                txn.mutate(delete_mutation, commit_now=True)
-                deleted += len(batch)
-                console.print(f"[dim]Deleted {deleted}/{len(uids_to_delete)} nodes...[/dim]")
-            except Exception as e:
-                console.print(f"[red]Error deleting batch: {e}[/red]")
-                txn.discard()
-                raise
-            finally:
-                txn.discard()
-        
-        console.print(f"[green]✓ Successfully deleted {deleted} nodes from the graph database.[/green]")
     except Exception as e:
         console.print(f"[red]Error clearing graph: {e}[/red]")
         raise typer.Exit(1)
     finally:
         client.close()
+
+
+@app.command("view")
+def view(
+    port: int = typer.Option(5000, "--port", "-p", help="Port to run the viewer on"),
+    host: str = typer.Option("localhost", "--host", "-h", help="Host to run the viewer on"),
+):
+    """Start the graph viewer web interface.
+    
+    This command starts the Flask application that serves the graph visualization
+    and automatically opens it in your default web browser.
+    """
+    import subprocess
+    import webbrowser
+    import time
+    import sys
+    
+    # Find the viewer app.py
+    # Current file is in cli/badger/main.py
+    # Viewer is in cli/graph-viewer/app.py
+    current_dir = Path(__file__).resolve().parent
+    viewer_path = current_dir.parent.parent / "graph-viewer" / "app.py"
+    
+    # Check if we are in the installed package structure or source
+    if not viewer_path.exists():
+        # Try alternative location (source structure: cli/badger/main.py -> cli/graph-viewer/app.py)
+        viewer_path = current_dir.parent / "graph-viewer" / "app.py"
+    
+    if not viewer_path.exists():
+        console.print(f"[red]Error: Could not find viewer application[/red]")
+        console.print(f"[yellow]Searched at: {viewer_path}[/yellow]")
+        raise typer.Exit(1)
+        
+    console.print(f"[green]Starting graph viewer...[/green]")
+    console.print(f"[dim]App path: {viewer_path}[/dim]")
+    
+    # Set environment variables for Flask
+    env = os.environ.copy()
+    env["FLASK_APP"] = str(viewer_path)
+    env["PORT"] = str(port)
+    
+    # Note: app.py uses PORT env var if set
+    
+    cmd = [sys.executable, str(viewer_path)]
+    
+    try:
+        # Start Flask app
+        process = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        console.print(f"[green]✓ Viewer started[/green]")
+        console.print(f"Opening http://{host}:{port} in browser...")
+        console.print("[dim]Press Ctrl+C to stop[/dim]\n")
+        
+        # Wait a moment for server to start then open browser
+        # time.sleep(1.5)
+        # webbrowser.open(f"http://{host}:{port}")
+        
+        # Stream output
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            if line:
+                # Print flask output nicely
+                if " * Running on" in line:
+                    console.print(f"[cyan]{line.strip()}[/cyan]")
+                elif "GET /" in line or "POST /" in line:
+                    console.print(f"[dim]{line.strip()}[/dim]")
+                else:
+                    print(line.strip())
+                    
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopping viewer...[/yellow]")
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        console.print("[green]✓ Viewer stopped[/green]")
+    except Exception as e:
+        console.print(f"[red]Error running viewer: {e}[/red]")
+        if 'process' in locals() and process:
+            process.terminate()
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

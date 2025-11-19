@@ -1,6 +1,6 @@
 type File {
     id: ID!
-    path: String! @search(by: [exact, term])
+    path: String! @id @search(by: [exact, term])
     functionsCount: Int
     classesCount: Int
     importsCount: Int
