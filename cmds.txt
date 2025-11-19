@@ -1,0 +1,9 @@
+
+If you have not enough free but you have memory available
+
+# Drop page cache (requires sudo password)
+sudo sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
+
+# Check free memory after
+free -h
+

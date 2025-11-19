@@ -1,0 +1,5 @@
+graphdb_endpoint: http://localhost:8080
+llm_provider: ollama
+max_retries: 3
+timeout: 300
+verbose: false

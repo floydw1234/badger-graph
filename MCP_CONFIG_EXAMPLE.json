@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "badger": {
+      "command": "/home/william/Documents/codingProj/badger/cli/venv/bin/python",
+      "args": ["-m", "badger.main", "mcp-server"],
+      "env": {
+        "BADGER_GRAPHDB_ENDPOINT": "http://localhost:8080",
+        "BADGER_WORKSPACE_PATH": "/home/william/Documents/codingProj/tinyweb/CTinyWeb"
+      }
+    }
+  }
+}
+

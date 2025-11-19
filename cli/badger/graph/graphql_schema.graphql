@@ -1,0 +1,115 @@
+type File {
+    id: ID!
+    path: String! @search(by: [exact, term])
+    functionsCount: Int
+    classesCount: Int
+    importsCount: Int
+    macrosCount: Int
+    variablesCount: Int
+    typedefsCount: Int
+    structFieldAccessesCount: Int
+    astNodes: Int
+    containsFunction: [Function] @hasInverse(field: containedInFile)
+    containsClass: [Class] @hasInverse(field: containedInFile)
+    containsImport: [Import] @hasInverse(field: containedInFile)
+    containsMacro: [Macro] @hasInverse(field: containedInFile)
+    containsVariable: [Variable] @hasInverse(field: containedInFile)
+    containsTypedef: [Typedef] @hasInverse(field: containedInFile)
+    containsStructFieldAccess: [StructFieldAccess] @hasInverse(field: containedInFile)
+    usesMacro: [Macro]
+    usesTypedef: [Typedef]
+}
+
+type Function {
+    id: ID!
+    name: String! @search(by: [exact, term])
+    file: String! @search(by: [exact])
+    line: Int
+    column: Int
+    signature: String
+    parameters: String
+    returnType: String
+    docstring: String
+    embedding: [Float!] @embedding @search(by: [hnsw])
+    belongsToClass: Class @hasInverse(field: containsMethod)
+    containedInFile: File
+    callsFunction: [Function] @hasInverse(field: calledByFunction)
+    calledByFunction: [Function]
+    usesVariable: [Variable] @hasInverse(field: usedInFunction)
+}
+
+type Class {
+    id: ID!
+    name: String! @search(by: [exact, term])
+    file: String! @search(by: [exact])
+    line: Int
+    column: Int
+    methods: [String!]
+    baseClasses: [String!]
+    embedding: [Float!] @embedding @search(by: [hnsw])
+    containedInFile: File
+    containsMethod: [Function]
+    inheritsClass: [Class] @hasInverse(field: inheritedByClass)
+    inheritedByClass: [Class]
+    accessedByFieldAccess: [StructFieldAccess] @hasInverse(field: accessesStruct)
+}
+
+type Import {
+    id: ID!
+    module: String! @search(by: [exact, term])
+    file: String! @search(by: [exact])
+    line: Int
+    text: String
+    importedItems: [String!]
+    alias: String
+    containedInFile: File
+}
+
+type Macro {
+    id: ID!
+    name: String! @search(by: [exact, term])
+    file: String! @search(by: [exact])
+    line: Int
+    column: Int
+    value: String
+    parameters: [String!]
+    containedInFile: File
+    usedInFile: [File] @hasInverse(field: usesMacro)
+}
+
+type Variable {
+    id: ID!
+    name: String! @search(by: [exact, term])
+    file: String! @search(by: [exact])
+    line: Int
+    column: Int
+    type: String
+    storageClass: String
+    isGlobal: Boolean
+    containedInFile: File
+    usedInFunction: [Function] @hasInverse(field: usesVariable)
+}
+
+type Typedef {
+    id: ID!
+    name: String! @search(by: [exact, term])
+    file: String! @search(by: [exact])
+    line: Int
+    column: Int
+    underlyingType: String
+    containedInFile: File
+    usedInFile: [File] @hasInverse(field: usesTypedef)
+}
+
+type StructFieldAccess {
+    id: ID!
+    structName: String! @search(by: [exact, term])
+    fieldName: String! @search(by: [exact, term])
+    file: String! @search(by: [exact])
+    line: Int
+    column: Int
+    accessType: String
+    containedInFile: File
+    accessesStruct: Class @hasInverse(field: accessedByFieldAccess)
+}
+

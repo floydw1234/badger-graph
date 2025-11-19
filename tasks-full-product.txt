@@ -1,0 +1,291 @@
+================================================================================
+BADGER PROJECT - MAJOR MILESTONES
+================================================================================
+
+NOTE: For MVP/tonight's work, see tasks-mvp.txt (trimmed down version)
+
+Status Legend:
+[ ] Not started
+[~] In progress
+[✓] Complete
+
+================================================================================
+PHASE 1: CORE INFRASTRUCTURE (Mostly Complete)
+================================================================================
+
+[✓] CLI scaffolding with interactive agent interface
+[✓] Basic tree-sitter parsers for Python and C (names and positions only)
+[✓] File discovery and parsing pipeline
+[✓] Graph data structure and relationship extraction
+[✓] Configuration management with endpoint prompting
+[~] Additional language parsers (JavaScript, TypeScript, Go, Rust, etc.)
+[ ] VSCode extension (Optional future work - currently CLI focused)
+    [ ] Note: README mentions VSCode extension, but current focus is CLI
+    [ ] Can be added later if needed
+
+================================================================================
+PHASE 1.5: TREE-SITTER ENHANCEMENT (Critical - Do This Before Phase 2)
+================================================================================
+
+[ ] Enhanced AST extraction for Python
+    [ ] Extract function signatures (parameters, return types, type hints)
+    [ ] Extract function docstrings
+    [ ] Extract class methods (not just class names)
+    [ ] Extract class inheritance relationships
+    [ ] Extract decorators on functions/classes
+    [ ] Extract variable definitions (module-level, class-level, function-level)
+    [ ] Extract variable types (type hints, annotations)
+    
+[ ] Enhanced AST extraction for C
+    [ ] Extract function signatures (parameters, return types)
+    [ ] Extract function declarations vs definitions
+    [ ] Extract struct/union/enum fields
+    [ ] Extract typedef definitions
+    [ ] Extract macro definitions
+    [ ] Extract variable declarations (global, local, static)
+    [ ] Extract pointer types and complex types
+    
+[ ] Function call detection (Critical for call graphs)
+    [ ] Python: Detect function calls (call expressions)
+    [ ] Python: Detect method calls (attribute access + call)
+    [ ] Python: Map calls to function definitions
+    [ ] C: Detect function calls
+    [ ] C: Handle function pointers
+    [ ] C: Map calls to function definitions/declarations
+    [ ] Track call sites (file, line, column)
+    
+[ ] Variable usage tracking
+    [ ] Track variable definitions (where variables are created)
+    [ ] Track variable usages (where variables are read/written)
+    [ ] Link usages to definitions
+    [ ] Handle scoping (local vs global vs class variables)
+    
+[ ] Import/Include resolution
+    [ ] Parse import statements more deeply (what's imported, from where)
+    [ ] Python: Handle import aliases
+    [ ] Python: Handle from X import Y
+    [ ] C: Parse include paths and resolve relative includes
+    [ ] Track import dependencies between files
+    
+[ ] Enhanced ParseResult data structure
+    [ ] Add function signatures to Function dataclass
+    [ ] Add method lists to Class dataclass
+    [ ] Add function_calls list (who calls what)
+    [ ] Add variable_definitions list
+    [ ] Add variable_usages list
+    [ ] Add inheritance relationships
+    [ ] Add decorators/annotations
+    [ ] Store full AST tree structure for "custom logic to piece trees together"
+    
+[ ] Cross-file relationship building ("custom logic to piece those trees together")
+    [ ] Resolve function calls across files (using imports)
+    [ ] Build import dependency graph
+    [ ] Track which functions are called from which files
+    [ ] Build class inheritance chains across files
+    [ ] Piece together individual file ASTs into larger unified graph
+    [ ] Resolve cross-file references and dependencies
+
+================================================================================
+PHASE 2: GRAPH DATABASE INTEGRATION
+================================================================================
+
+[ ] Dgraph client implementation
+    [ ] Install and configure dgraph-js or python dgraph client
+    [ ] Support local Dgraph instance (primary use case)
+    [ ] Support remote Dgraph endpoints (for future cloud deployment - "remote later")
+    [ ] Define Dgraph schema for code graph:
+        - File nodes (path, language, functions_count, classes_count)
+        - Function nodes (name, file, line, column, signature)
+        - Class nodes (name, file, line, column, methods)
+        - Import nodes (module, file, line)
+        - Relationship edges (file_contains_function, file_contains_class, 
+          function_calls_function, class_inherits_class, imports_module)
+    
+[ ] Graph insertion (insert_graph method)
+    [ ] Convert GraphData to Dgraph mutations
+    [ ] Batch insert nodes and edges
+    [ ] Handle errors and retries
+    
+[ ] Graph querying (query_context method)
+    [ ] Construct GraphQL queries from query elements
+    [ ] Execute GraphQL queries against Dgraph
+    [ ] Return relevant context (functions, classes, relationships)
+    [ ] Support complex queries (functions + their callers + related files)
+    [ ] Support remote Dgraph endpoints (for future cloud deployment)
+    
+[ ] Incremental graph updates (update_graph method)
+    [ ] Detect changed files
+    [ ] Remove old nodes for changed files
+    [ ] Insert updated nodes
+    [ ] Update relationships
+
+================================================================================
+PHASE 3: LLM INTEGRATION SETUP
+================================================================================
+
+[ ] Ollama server setup (Development - fast iteration)
+    [ ] Install and configure Ollama
+    [ ] Set up qwen-3-coder-30b model serving (pull model)
+    [ ] Set up gpt-oss-120b model serving (pull model)
+    [ ] Test model inference endpoints
+    [ ] Note: Using Ollama for development due to fast startup times (seconds vs hours)
+    [ ] Note: Can switch to vLLM later for production/performance testing
+    
+[ ] vLLM server setup (Production/Performance - optional)
+    [ ] Install and configure vLLM (when performance is needed)
+    [ ] Set up qwen-3-coder-30b model serving
+    [ ] Fine-tune qwen-3-coder-30b for graph query generation (or obtain fine-tuned model)
+    [ ] Set up gpt-oss-120b model serving
+    [ ] Test model inference endpoints
+    
+[ ] LLM client integration
+    [ ] Create LLM client wrapper for OpenAI-compatible API (works with Ollama & vLLM)
+    [ ] Implement streaming responses
+    [ ] Handle errors and retries
+    [ ] Token counting and rate limiting
+    [ ] Support both Ollama and vLLM endpoints (configurable)
+
+================================================================================
+PHASE 4: QUERY PROCESSING PIPELINE
+================================================================================
+
+[ ] Query parser enhancement
+    [ ] Implement intelligent code element extraction
+    [ ] Use qwen-3-coder-30b to parse user queries
+    [ ] Extract function names, class names, variables from natural language
+    [ ] Generate GraphQL query structure from extracted elements
+    
+[ ] Context retrieval workflow
+    [ ] User input → qwen-3-coder-30b (fine-tuned) → extract query elements
+    [ ] Query elements → Dgraph GraphQL query → retrieve context
+    [ ] Format context for LLM consumption
+    [ ] Include relevant code snippets, relationships, and metadata
+    [ ] Pipe formatted context into gpt-oss-120b prompt
+
+================================================================================
+PHASE 5: MCP SERVER IMPLEMENTATION
+================================================================================
+
+[ ] MCP server setup
+    [ ] Install MCP SDK
+    [ ] Create MCP server structure
+    [ ] Register tools: read_file, edit_file, query_graph
+    
+[ ] MCP tool implementations
+    [ ] read_file tool - read source files (replaces need for grepping)
+    [ ] edit_file tool - modify files with preview
+    [ ] query_graph tool - GraphQL queries to Dgraph (primary tool for context)
+    [ ] Tool response formatting
+    [ ] Ensure tools replace file grepping/reading workflow
+    
+[ ] MCP server integration
+    [ ] Connect MCP server to main agent
+    [ ] Expose tools to gpt-oss-120b
+    [ ] Handle tool calls and responses
+
+================================================================================
+PHASE 6: AGENT WORKFLOW IMPLEMENTATION
+================================================================================
+
+[ ] Main agent loop enhancement (Complete workflow from README)
+    [ ] User input received
+    [ ] User input → qwen-3-coder-30b (fine-tuned) → extract query elements → graph query
+    [ ] Graph query → Dgraph GraphQL → context retrieval
+    [ ] Pipe context result into gpt-oss-120b prompt
+    [ ] Context + user input → gpt-oss-120b → response with tool calls
+    [ ] Execute tool calls (read_file, edit_file, MCP GraphQL queries to graph db)
+    [ ] Show preview of changes to user
+    [ ] Get user approval before applying changes
+    [ ] Apply approved changes to files
+    
+[ ] Tool call execution
+    [ ] Parse tool calls from LLM response
+    [ ] Execute read_file tool calls
+    [ ] Execute edit_file tool calls with preview
+    [ ] Execute query_graph tool calls
+    [ ] Format tool results for LLM
+    
+[ ] User approval workflow
+    [ ] Show diff previews for file edits
+    [ ] Interactive approval prompts
+    [ ] Batch approval for multiple changes
+    [ ] Rollback on rejection
+
+================================================================================
+PHASE 7: ADVANCED FEATURES
+================================================================================
+
+[ ] File watching and auto-updates (Per README: "Update the graph with each file save")
+    [ ] Watch for file changes (file save events)
+    [ ] Auto-reparse changed files on save
+    [ ] Incremental graph updates on file save
+    [ ] Update Dgraph immediately when files are saved
+    
+[ ] Query optimization
+    [ ] Cache frequently accessed graph data
+    [ ] Optimize GraphQL queries
+    [ ] Batch multiple queries
+    
+[ ] Error handling and recovery
+    [ ] Graceful handling of parsing errors
+    [ ] Graph database connection retries
+    [ ] LLM API error handling
+    [ ] User-friendly error messages
+
+================================================================================
+PHASE 8: TESTING & POLISH
+================================================================================
+
+[ ] Unit tests
+    [ ] Parser tests for each language
+    [ ] Graph builder tests
+    [ ] Dgraph client tests
+    [ ] Query parser tests
+    
+[ ] Integration tests
+    [ ] End-to-end indexing workflow
+    [ ] Graph query and retrieval
+    [ ] LLM integration tests
+    [ ] Tool call execution tests
+    
+[ ] Performance optimization
+    [ ] Profile parsing performance
+    [ ] Optimize graph insertion
+    [ ] Cache LLM responses where appropriate
+    [ ] Parallel file parsing
+    
+[ ] Documentation
+    [ ] API documentation
+    [ ] User guide
+    [ ] Development guide
+    [ ] Architecture documentation
+
+================================================================================
+PRIORITY ORDER (Suggested Implementation Path)
+================================================================================
+
+1. PHASE 1.5: Tree-Sitter Enhancement (CRITICAL - Extract rich AST data first!)
+   - Without function calls, signatures, and relationships, the graph will be weak
+   - This is the foundation for everything else - do this before Phase 2
+   
+2. PHASE 2: Graph Database Integration (Critical - needed for everything else)
+   - Can't build a good graph without rich data from Phase 1.5
+   
+3. PHASE 3: LLM Integration Setup (Using Ollama for development)
+4. PHASE 4: Query Processing Pipeline (Needed for context retrieval)
+5. PHASE 5: MCP Server (Needed for tool calls)
+6. PHASE 6: Agent Workflow (Ties everything together)
+7. PHASE 7: Advanced Features (Polish and optimization)
+8. PHASE 8: Testing & Polish (Final touches)
+
+================================================================================
+NOTES
+================================================================================
+
+- Test each phase independently before moving to the next
+- Keep the interactive agent working throughout development
+- Using Ollama for development (fast iteration) - switch to vLLM for production/performance
+- Document as you go - it helps with debugging
+
+================================================================================
+

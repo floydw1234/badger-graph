@@ -1,0 +1,403 @@
+================================================================================
+BADGER PROJECT - MVP: MCP SERVER FOR C APPLICATIONS
+================================================================================
+
+PROJECT SCOPE:
+- Expose an MCP (Model Context Protocol) server for C applications
+- Enable LLMs to query code graph database instead of grepping/reading files
+- Focus on C codebases only (Python support exists but not primary focus)
+- Leverage existing infrastructure: C parser, Dgraph integration, embeddings
+
+Status Legend:
+[ ] Not started
+[~] In progress
+[✓] Complete
+
+================================================================================
+PHASE 1: C CODEBASE INDEXING (Foundation - Already Complete)
+================================================================================
+
+[✓] C parser implementation
+    [✓] Extract function signatures (parameters, return types)
+    [✓] Extract function declarations vs definitions
+    [✓] Extract struct/union/enum fields
+    [✓] Extract typedef definitions
+    [✓] Extract pointer types and complex types
+    [✓] Function call detection (direct calls, function pointers)
+    [✓] Include parsing and resolution
+    [✓] Cross-file relationship building
+    [✓] Extract macro definitions (simple and function-like)
+    [✓] Extract variable declarations (global, local, static, extern)
+    [✓] Extract struct field accesses (direct and pointer access)
+    [✓] Extract macro usages
+    [✓] Extract variable usages
+    [✓] Extract typedef usages
+    
+[✓] Graph database integration
+    [✓] Dgraph client implementation
+    [✓] Schema definition (File, Function, Class, Import, Macro, Variable, Typedef, StructFieldAccess nodes + relationships)
+    [✓] Graph insertion (batch insert nodes and edges)
+    [✓] Graph querying (GraphQL queries via execute_graphql_query)
+    [✓] Incremental graph updates
+    
+[✓] Vector embeddings infrastructure
+    [✓] Embedding generation for functions and classes
+    [✓] Embedding storage in Dgraph with HNSW indexing
+    [✓] Vector similarity search (via GraphQL queries)
+
+================================================================================
+PHASE 2: MCP SERVER IMPLEMENTATION (Core MVP)
+================================================================================
+
+[✓] MCP server setup
+    [✓] Install MCP SDK (mcp Python package)
+    [✓] Create MCP server module structure (cli/badger/mcp/)
+    [✓] Initialize MCP server with stdio transport
+    [✓] Configure server metadata (name, version, description)
+    [✓] Set up server lifecycle (startup, shutdown)
+    [✓] Use async/await pattern for all tools
+    
+[✓] MCP tool: find_symbol_usages
+    [✓] Register find_symbol_usages tool with MCP server
+    [✓] Tool signature: async def find_symbol_usages(symbol: str, symbol_type: str) -> dict
+    [✓] Tool parameters:
+        - symbol: Symbol name (function, macro, variable, struct, typedef)
+        - symbol_type: Type of symbol ("function", "macro", "variable", "struct", "typedef")
+    [✓] Implementation:
+        - Query Dgraph for all usages of the symbol
+        - Handle different symbol types (functions, macros, variables, structs, typedefs)
+        - Return file paths, line numbers, and usage contexts
+        - Use GraphQL queries to traverse call graphs and references
+    [✓] Tool description: "Find all usages of a symbol (function, macro, variable, struct). Use this when refactoring to find all places that need updates."
+    
+[✓] MCP tool: get_include_dependencies
+    [✓] Register get_include_dependencies tool with MCP server
+    [✓] Tool signature: async def get_include_dependencies(file_path: str) -> dict
+    [✓] Tool parameters:
+        - file_path: Path to header file (required)
+    [✓] Implementation:
+        - Query Dgraph for transitive include dependencies
+        - Traverse import/include relationships recursively
+        - Build dependency tree structure
+        - Return full dependency tree with file paths
+    [✓] Tool description: "Get all files that transitively include this header file. Use this before modifying a header to see impact. Returns the full dependency tree."
+    
+[✓] MCP tool: find_struct_field_access
+    [✓] Register find_struct_field_access tool with MCP server
+    [✓] Tool signature: async def find_struct_field_access(struct_name: str, field_name: str) -> dict
+    [✓] Tool parameters:
+        - struct_name: Name of the struct (required)
+        - field_name: Name of the field (required)
+    [✓] Implementation:
+        - Query Dgraph for struct field accesses
+        - Handle direct access (struct.field), pointer access (struct->field), and casts
+        - Return file paths, line numbers, and access types
+    [✓] Tool description: "Find all places where a struct field is accessed. Use this when renaming or removing struct fields. Includes direct access, pointer access, and casts."
+    
+[✓] MCP tool: get_function_callers
+    [✓] Register get_function_callers tool with MCP server
+    [✓] Tool signature: async def get_function_callers(function_name: str, include_indirect: bool = True) -> dict
+    [✓] Tool parameters:
+        - function_name: Name of the function (required)
+        - include_indirect: Include function pointer assignments (default: True)
+    [✓] Implementation:
+        - Query Dgraph for direct function callers (function_calls_function relationship)
+        - If include_indirect=True, also find function pointer assignments
+        - Return callers with file paths, line numbers, and call contexts
+        - Handle function pointer callbacks and indirect calls
+    [✓] Tool description: "Find all callers of a function, including function pointer assignments. Use this when changing function signatures. include_indirect finds uses as callbacks/function pointers."
+    
+[✓] MCP tool: semantic_code_search
+    [✓] Register semantic_code_search tool with MCP server
+    [✓] Tool signature: async def semantic_code_search(query: str, file_pattern: str = "*", limit: int = 10) -> dict
+    [✓] Tool parameters:
+        - query: Natural language query (required)
+        - file_pattern: Glob pattern to filter files (default: "*")
+        - limit: Maximum number of results (default: 10)
+    [✓] Implementation:
+        - Generate query embedding using EmbeddingService
+        - Execute vector similarity search via GraphQL
+        - Filter results by file_pattern if provided
+        - Return top-K matching functions/classes with metadata
+        - Include file paths, line numbers, signatures, and similarity scores
+    [✓] Tool description: "Search for code by semantic meaning using embeddings. Use this to find similar code patterns or related functionality. Example: 'buffer allocation' finds all buffer-related code."
+    
+[✓] MCP tool: check_affected_files
+    [✓] Register check_affected_files tool with MCP server
+    [✓] Tool signature: async def check_affected_files(changed_files: list[str]) -> dict
+    [✓] Tool parameters:
+        - changed_files: List of file paths that were changed (required)
+    [✓] Implementation:
+        - For each changed file, find transitive dependencies via includes
+        - Find all functions in changed files
+        - Find all callers of those functions (call graph traversal)
+        - Find all files that include the changed headers
+        - Return comprehensive list of potentially affected files
+        - Include relationship types (direct include, transitive include, function call)
+    [✓] Tool description: "Given a list of changed files, find all files that might be affected. Use this before committing to see full impact of changes. Includes transitive dependencies and call graph relationships."
+    
+[✓] MCP server entry point
+    [✓] Create CLI command to start MCP server (e.g., `badger mcp-server`)
+    [✓] Configure stdio transport for MCP communication
+    [✓] Initialize DgraphClient and EmbeddingService
+    [✓] Handle server startup and graceful shutdown
+    [✓] Add logging for tool calls and errors
+
+================================================================================
+PHASE 3: MCP SERVER TESTING & VALIDATION
+================================================================================
+
+[✓] MCP server integration tests
+    [✓] Test MCP server startup and initialization
+    [✓] Test find_symbol_usages with various symbol types
+    [✓] Test get_include_dependencies with header files
+    [✓] Test find_struct_field_access with struct fields
+    [✓] Test get_function_callers with direct and indirect calls
+    [✓] Test semantic_code_search with various queries
+    [✓] Test check_affected_files with changed file lists
+    [✓] Test error handling for invalid inputs
+    [✓] Test tool response formatting
+    
+[✓] End-to-end workflow test
+    [✓] Index sample C codebase
+    [✓] Connect MCP client to server
+    [✓] Execute find_symbol_usages to find function usages
+    [✓] Execute get_include_dependencies to check header impact
+    [✓] Execute semantic_code_search to find related code
+    [✓] Execute check_affected_files to see change impact
+    [✓] Verify complete refactoring workflow works
+
+[✓] MCP server documentation
+    [✓] Document available tools and parameters
+    [✓] Provide example GraphQL queries
+    [✓] Document setup and configuration
+    [✓] Include usage examples
+
+================================================================================
+PHASE 4: OPTIONAL ENHANCEMENTS (Post-MVP)
+================================================================================
+
+[ ] File watching and auto-updates
+    [ ] Watch for file changes in indexed codebase
+    [ ] Auto-reparse changed files on save
+    [ ] Incremental graph updates on file save
+    [ ] Update Dgraph immediately when files are saved
+    
+[✓] Parser enhancements (REQUIRED for find_struct_field_access tool)
+    [✓] Extend C parser to track struct field accesses
+    [✓] Track direct access (struct.field) - field_expression node type
+    [✓] Track pointer access (struct->field) - pointer_expression node type
+    [✓] Track field access through casts
+    [✓] Extract struct name and field name from access expressions
+    [✓] Store field access relationships in graph (StructFieldAccess node type)
+    [✓] Update GraphQL schema with StructFieldAccess type
+    [✓] Update graph builder to include field access data
+    [✓] Add macro extraction and usage tracking
+    [✓] Add variable extraction and usage tracking
+    [✓] Add typedef usage tracking
+    [✓] Update Dgraph client to insert new node types
+
+[ ] Performance optimization
+    [ ] Query result caching
+    [ ] Batch operations
+    [ ] Connection pooling
+
+SKIP FOR MVP:
+- VSCode extension
+- Complex LLM orchestration (qwen-3-coder, gpt-oss-120b workflow)
+- Agent workflow with user approval
+- Context formatting for LLM consumption (tools return raw data)
+- Query construction with LLM (LLM constructs GraphQL directly)
+
+================================================================================
+ARCHITECTURE DECISIONS
+================================================================================
+
+1. **MCP Server Focus**: Primary goal is exposing graph database via MCP protocol
+   - LLMs can query graph directly using GraphQL
+   - No need for complex query construction pipeline
+   - Tools return structured data, LLM formats as needed
+
+2. **C Codebase Focus**: Simplified to C applications only
+   - Python parser exists but not primary focus
+   - Can add other languages later if needed
+   - Keeps scope manageable
+
+3. **Direct GraphQL Queries**: LLM constructs GraphQL queries directly
+   - No need for qwen-3-coder-30b query construction
+   - Simpler architecture, faster execution
+   - LLMs are good at GraphQL query construction
+
+4. **Leverage Existing Infrastructure**:
+   - C parser: ✓ Complete
+   - Dgraph integration: ✓ Complete
+   - Embeddings: ✓ Complete
+   - Vector search: ✓ Complete
+   - Just need MCP server wrapper
+
+5. **Tool Design** (C-focused refactoring tools):
+   - find_symbol_usages: Find all usages of symbols (critical for refactoring)
+   - get_include_dependencies: Check header file impact (prevents breaking changes)
+   - find_struct_field_access: Find struct field usages (field-level refactoring)
+   - get_function_callers: Find function callers (signature change impact)
+   - semantic_code_search: Semantic search using embeddings (find related code)
+   - check_affected_files: Impact analysis for changed files (pre-commit validation)
+
+================================================================================
+MVP PRIORITY ORDER
+================================================================================
+
+1. PHASE 1: C Codebase Indexing - ✓ COMPLETE
+   - All infrastructure already exists and tested
+   
+2. PHASE 2: MCP Server Implementation - ✓ COMPLETE
+   - ✓ MCP SDK installed (mcp>=1.0.0 in requirements.txt and pyproject.toml)
+   - ✓ MCP server structure created (cli/badger/mcp/ directory)
+   - ✓ All 6 core tools implemented (find_symbol_usages, get_include_dependencies, 
+     find_struct_field_access, get_function_callers, semantic_code_search, 
+     check_affected_files)
+   - ✓ Server entry point created (badger mcp-server CLI command)
+   - ✓ All tools registered and functional
+   
+3. PHASE 3: MCP Server Testing - ✓ COMPLETE
+   - ✓ Integration tests created (tests/test_mcp/)
+   - ✓ End-to-end workflow validation tests
+   - ✓ Documentation complete (MCP_SETUP.md)
+
+4. PHASE 4: Optional Enhancements - [ ] FUTURE
+   - File watching
+   - Additional tools
+   - Performance optimization
+
+================================================================================
+IMPLEMENTATION NOTES
+================================================================================
+
+**MCP Server Structure:**
+```
+cli/badger/mcp/
+  __init__.py
+  server.py          # Main MCP server implementation
+  tools.py           # Tool implementations
+  config.py          # MCP server configuration
+```
+
+**Dependencies to Add:**
+- mcp (MCP SDK for Python) - NOT in requirements.txt yet
+
+**Existing Dependencies (Already Installed):**
+- pydgraph (Dgraph client)
+- sentence-transformers (embeddings)
+- tree-sitter (parsing)
+
+**Key Integration Points (All Available):**
+- DgraphClient.execute_graphql_query() - ✓ Implemented, ready to use
+- EmbeddingService.generate_embedding() - ✓ Implemented, ready to use
+- DgraphClient (vector search GraphQL queries) - ✓ Implemented via querySimilarFunctionById/querySimilarClassById
+- GraphQL schema - ✓ Complete with File, Function, Class, Import, Macro, Variable, Typedef, StructFieldAccess types and relationships
+- GraphQL queries for:
+  - find_symbol_usages: Query function/macro/variable/struct/typedef references (schema complete)
+  - get_include_dependencies: Traverse import/include relationships (Import type exists)
+  - find_struct_field_access: Query struct field accesses (StructFieldAccess type exists)
+  - get_function_callers: Query function_calls_function relationships (✓ relationship exists)
+  - check_affected_files: Combine include and call graph traversals (can use existing relationships)
+
+**MCP Server Configuration:**
+- Transport: stdio (standard for MCP)
+- Tools: find_symbol_usages, get_include_dependencies, find_struct_field_access,
+         get_function_callers, semantic_code_search, check_affected_files
+- Resources: None (tools-only server)
+- Prompts: None (tools-only server)
+- All tools are async functions returning dict
+
+================================================================================
+PROGRESS SUMMARY
+================================================================================
+
+**Completed Infrastructure (Verified):**
+- ✓ C parser with full AST extraction
+  - Functions (signatures, parameters, return types, declarations vs definitions)
+  - Structs/Unions/Enums (field extraction)
+  - Typedefs
+  - Macros (simple and function-like macros)
+  - Variables (global, local, static, extern with function context)
+  - Struct field accesses (direct access struct.field, pointer access struct->field, with casts)
+  - Macro usages (identifier nodes matching macro names)
+  - Variable usages (identifier nodes matching variable names, with shadowing handling)
+  - Typedef usages (type_identifier nodes matching typedef names)
+  - Includes (system vs local, module resolution)
+  - Function calls (direct calls, function pointers)
+  - Cross-file relationship building via CrossFileResolver
+  
+- ✓ Dgraph integration with GraphQL support
+  - DgraphClient with gRPC and HTTP endpoints
+  - GraphQL schema definition (File, Function, Class, Import, Macro, Variable, Typedef, StructFieldAccess types)
+  - Graph insertion (batch insert with embeddings)
+  - Graph querying via execute_graphql_query()
+  - Incremental graph updates (update_graph method)
+  - Schema setup and management
+  - Usage relationship tracking (macro_usage, variable_usage, typedef_usage)
+  - Struct field access to Class linking
+  
+- ✓ Vector embeddings infrastructure
+  - EmbeddingService using sentence-transformers (all-MiniLM-L6-v2, 384 dims)
+  - Embedding generation for functions (name + signature + docstring)
+  - Embedding generation for classes (name + methods)
+  - Embedding storage in Dgraph with HNSW indexing
+  - Vector similarity search via GraphQL (querySimilarFunctionById, querySimilarClassById)
+  
+- ✓ GraphQL query capabilities
+  - Direct GraphQL query execution
+  - Vector similarity search queries
+  - Relationship traversal (function_calls_function, class_inherits_class, imports)
+  - File containment relationships
+  - Usage relationships (macro_usage, variable_usage, typedef_usage)
+  - Struct field access relationships
+
+**Remaining Work:**
+- [✓] MCP server implementation (Phase 2) - COMPLETE
+  - ✓ MCP server structure exists (cli/badger/mcp/)
+  - ✓ MCP SDK installed (mcp>=1.0.0)
+  - ✓ All 6 tools implemented and registered
+  
+- [✓] Parser enhancement for struct field access (COMPLETE)
+  - C parser now tracks struct.field and struct->field accesses
+  - Parser extracts field access expressions including casts
+  - Field access relationships stored in graph as StructFieldAccess nodes
+  - Macro, variable, and typedef extraction and usage tracking also complete
+  
+- [✓] MCP server testing (Phase 3) - COMPLETE
+  - ✓ Integration tests for all 6 tools
+  - ✓ Server initialization tests
+  - ✓ End-to-end workflow tests
+  - ✓ Test fixtures and infrastructure
+- [✓] Documentation and examples - COMPLETE
+  - ✓ MCP_SETUP.md with setup instructions
+  - ✓ Tool descriptions and usage examples
+
+**Implementation Status Details:**
+- MCP SDK: ✓ Installed (mcp>=1.0.0 in requirements.txt and pyproject.toml)
+- MCP server code: ✓ Complete (cli/badger/mcp/ with server.py, tools.py, config.py)
+- Tool implementations: ✓ All 6 tools implemented and functional
+- Struct field tracking: ✓ Implemented in parser (find_struct_field_access tool implemented)
+- Vector search: ✓ Implemented in Dgraph with wrapper for semantic_code_search tool
+- GraphQL queries: ✓ Fully functional, all tools using them
+
+**Estimated Complexity:**
+- MCP server setup: Low (SDK handles most complexity)
+- Tool implementations: Low-Medium (wrappers around existing GraphQL queries)
+- Parser enhancements: ✓ Complete (struct field access, macros, variables, typedefs all implemented)
+- Testing: Low (integration tests with existing infrastructure)
+
+**Implementation Order:**
+1. All 6 tools can now be implemented (parser enhancements complete):
+   - find_symbol_usages (functions, macros, variables, structs, typedefs - schema complete)
+   - get_include_dependencies (Import relationships exist)
+   - find_struct_field_access (StructFieldAccess type exists, parser tracks field accesses)
+   - get_function_callers (function_calls_function relationship exists)
+   - semantic_code_search (vector search implemented, needs wrapper)
+   - check_affected_files (can use existing relationships)
+
+**Recommendation:** All infrastructure is complete. Proceed with MCP server implementation for all 6 tools.
+
+================================================================================

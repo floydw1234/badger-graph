@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Badger Graph Explorer - GraphiQL</title>
+    <style>
+        body {
+            margin: 0;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #graphiql-container {
+            height: 100vh;
+        }
+    </style>
+    <link rel="stylesheet" href="https://unpkg.com/graphiql@3/graphiql.min.css" />
+</head>
+<body>
+    <div id="graphiql-container"></div>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/graphiql@3/graphiql.min.js"></script>
+    <script>
+        const graphqlEndpoint = '{{ graphql_endpoint }}';
+        
+        // Example queries to help get started
+        const defaultQuery = `# Welcome to Badger Graph Explorer!
+# Use this interface to query your live graph data
+
+# Example: Get all files with their functions
+{
+  files: queryFile(first: 10) {
+    id
+    path
+    functionsCount
+    classesCount
+    containsFunction {
+      id
+      name
+      file
+      line
+      signature
+      callsFunction {
+        id
+        name
+      }
+    }
+    containsClass {
+      id
+      name
+      file
+      line
+      containsMethod {
+        id
+        name
+        signature
+      }
+    }
+  }
+}
+
+# Example: Search for a specific function
+# {
+#   functions: queryFunction(filter: {name: {eq: "main"}}) {
+#     id
+#     name
+#     file
+#     line
+#     signature
+#     callsFunction {
+#       id
+#       name
+#       file
+#     }
+#     calledByFunction {
+#       id
+#       name
+#       file
+#     }
+#   }
+# }
+
+# Example: Get all classes with inheritance
+# {
+#   classes: queryClass(first: 10) {
+#     id
+#     name
+#     file
+#     inheritsClass {
+#       id
+#       name
+#       file
+#     }
+#     inheritedByClass {
+#       id
+#       name
+#       file
+#     }
+#   }
+# }
+`;
+
+        function graphQLFetcher(graphQLParams) {
+            return fetch(graphqlEndpoint, {
+                method: 'post',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(graphQLParams),
+            }).then(response => response.json());
+        }
+
+        // Initialize GraphiQL
+        const root = ReactDOM.createRoot(document.getElementById('graphiql-container'));
+        root.render(
+            React.createElement(GraphiQL.GraphiQL, {
+                fetcher: graphQLFetcher,
+                defaultQuery: defaultQuery,
+            })
+        );
+    </script>
+</body>
+</html>
+

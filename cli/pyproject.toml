@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "badger"
+version = "0.1.0"
+description = "Code graph context tool for LLMs using tree-sitter and Dgraph"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "typer[all]>=0.9.0",
+    "tree-sitter>=0.20.0",
+    "tree-sitter-python>=0.20.0",
+    "tree-sitter-c>=0.20.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "rich>=13.0.0",
+    "pyyaml>=6.0",
+    "pydgraph>=23.0.0",
+    "openai==2.8.0",
+    "tiktoken>=0.12.0",
+    "requests>=2.31.0",
+    "sentence-transformers>=2.2.0",
+    "mcp>=1.0.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+badger = "badger.main:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["badger*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests (only run with '-m integration')",
+    "llm: marks tests as llm tests (only run with '-m llm')",
+]
+addopts = "-m 'not integration and not llm'"
+asyncio_mode = "auto"
+
+

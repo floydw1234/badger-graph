@@ -1,0 +1,18 @@
+services:
+  dgraph:
+    image: dgraph/standalone:latest
+    container_name: badger-dgraph
+    ports:
+      - "8080:8080"  # HTTP API
+      - "9080:9080"  # gRPC API
+    volumes:
+      - ./dgraph-data:/dgraph  # Persist Dgraph data locally
+    restart: unless-stopped
+    environment:
+      - DGRAPH_ALPHA_WHITELIST=0.0.0.0/0
+    networks:
+      - badger-network
+
+networks:
+  badger-network:
+    driver: bridge
