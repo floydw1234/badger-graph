@@ -72,26 +72,34 @@ Then:
 
 ## Commands
 
+All commands use the local Dgraph endpoint from `.badgerrc` by default. You can override this with the `--endpoint` option on most commands.
+
 ### `badger init_graph`
 
 Initialize the graph database (Dgraph). By default, starts a local Dgraph container.
 
 ```bash
-badger init_graph [--endpoint URL] [--port 8080] [--skip-docker]
+badger init_graph [--endpoint URL] [--compose-file PATH] [--skip-docker]
 ```
 
 Options:
 - `--endpoint`: Dgraph endpoint URL (default: http://localhost:8080 for local Docker container)
-- `--port`: HTTP port for Dgraph (default: 8080)
-- `--grpc-port`: gRPC port for Dgraph (default: 9080)
+- `--compose-file`: Path to docker-compose.yml (default: `dgraph/docker-compose.yml`)
 - `--skip-docker`: Skip Docker setup, just configure endpoint
+
+**What it does:**
+1. Checks if Docker is installed and running
+2. Starts Dgraph using docker-compose (from `dgraph/docker-compose.yml`)
+3. Sets up the GraphQL schema
+4. Saves configuration to `.badgerrc`
 
 **Examples:**
 - Local (default): `badger init_graph`
-- Remote server: `badger init_graph --endpoint http://remote-server:8080`
+- Remote server: `badger init_graph --endpoint http://remote-server:8080 --skip-docker`
+- Custom compose file: `badger init_graph --compose-file /path/to/docker-compose.yml`
 
 **Data Persistence:**
-- Data is automatically persisted to `.badger-data/dgraph/` in your project directory
+- Data is automatically persisted to `dgraph/dgraph-data/` in your project directory
 - Data persists across container stops/restarts
 - Use `badger stop_graph` to stop the container (data is preserved)
 - Use `badger start_graph` to restart the container
@@ -126,6 +134,27 @@ Options:
 - `--workspace`: Path to workspace (default: current directory)
 - `--endpoint`: Dgraph endpoint URL
 
+This command:
+- Displays step-by-step setup instructions
+- Generates the JSON configuration for Cursor
+- Saves the config to `.badger-mcp-config.json` for easy copying
+
+### `badger mcp-server`
+
+Start the MCP server manually (typically invoked automatically by Cursor).
+
+```bash
+badger mcp-server [--graphdb-endpoint URL] [--workspace PATH] [--auto-index] [--verbose]
+```
+
+Options:
+- `--graphdb-endpoint`: Graph database endpoint URL (default: local from `.badgerrc` or http://localhost:8080)
+- `--workspace`: Path to workspace/codebase root (default: current directory)
+- `--auto-index`: Enable automatic indexing on startup
+- `--verbose`: Enable verbose logging
+
+**Note:** This command is typically invoked automatically by Cursor when configured. You can run it manually for testing.
+
 ### `badger stats`
 
 Show node counts in the graph database. Uses the local endpoint from `.badgerrc` by default.
@@ -146,48 +175,64 @@ badger clear [--endpoint URL] [--yes]
 
 ### `badger stop_graph`
 
-Stop the local Dgraph container. Data is preserved in `.badger-data/dgraph/`.
+Stop the local Dgraph container using docker-compose. Data is preserved.
 
 ```bash
-badger stop_graph [--container dgraph]
+badger stop_graph [--compose-file PATH]
 ```
+
+Options:
+- `--compose-file`: Path to docker-compose.yml (default: `dgraph/docker-compose.yml`)
+
+**Note:** This stops the container but preserves all data. The data is stored in `dgraph/dgraph-data` and persists across stops/restarts.
 
 ### `badger start_graph`
 
-Start a previously stopped Dgraph container. All data is preserved.
+Start a previously stopped Dgraph container using docker-compose. All data is preserved.
 
 ```bash
-badger start_graph [--container dgraph]
+badger start_graph [--compose-file PATH]
 ```
+
+Options:
+- `--compose-file`: Path to docker-compose.yml (default: `dgraph/docker-compose.yml`)
+
+**Note:** This starts a previously stopped container. All data is preserved from when the container was last running.
 
 ### `badger status_graph`
 
 Show the status of the local Dgraph container.
 
 ```bash
-badger status_graph [--container dgraph]
+badger status_graph [--compose-file PATH]
 ```
+
+Options:
+- `--compose-file`: Path to docker-compose.yml (default: `dgraph/docker-compose.yml`)
+
+Shows whether the container is running, stopped, or exited.
 
 ## Data Persistence
 
 **How it works:**
-- When you run `badger init_graph`, a Docker volume is created that maps `.badger-data/dgraph/` to `/dgraph` in the container
-- All Dgraph data is stored in `.badger-data/dgraph/` in your project directory
+- When you run `badger init_graph`, Docker Compose creates a volume that maps `dgraph/dgraph-data/` to `/dgraph` in the container
+- All Dgraph data is stored in `dgraph/dgraph-data/` in your project directory
 - Data persists across:
   - Container stops/restarts
-  - System reboots (container auto-restarts with `--restart unless-stopped`)
-  - Container removal (as long as you don't delete `.badger-data/`)
+  - System reboots (container auto-restarts with `restart: unless-stopped`)
+  - Container removal (as long as you don't delete `dgraph/dgraph-data/`)
 
 **Lifecycle:**
-1. `badger init_graph` - Creates container with persistent volume
-2. `badger index` - Indexes codebase, data saved to `.badger-data/dgraph/`
-3. `badger stop_graph` - Stops container, data remains in `.badger-data/dgraph/`
-4. `badger start_graph` - Restarts container, loads data from `.badger-data/dgraph/`
+1. `badger init_graph` - Creates container with persistent volume using docker-compose
+2. `badger index` - Indexes codebase, data saved to `dgraph/dgraph-data/`
+3. `badger stop_graph` - Stops container, data remains in `dgraph/dgraph-data/`
+4. `badger start_graph` - Restarts container, loads data from `dgraph/dgraph-data/`
+5. `badger status_graph` - Check if container is running
 
 **To completely remove data:**
 ```bash
 badger stop_graph
-rm -rf .badger-data/dgraph
+rm -rf dgraph/dgraph-data
 ```
 
 ## Features

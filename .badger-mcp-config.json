@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "badger": {
+      "command": "/home/william/Documents/codingProj/badger/cli/venv/bin/python",
+      "args": [
+        "/home/william/Documents/codingProj/badger/cli/mcp_server_with_logging.py",
+        "--graphdb-endpoint",
+        "http://localhost:8080",
+        "--workspace",
+        "/home/william/Documents/codingProj/badger"
+      ]
+    }
+  }
+}
