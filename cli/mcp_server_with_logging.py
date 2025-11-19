@@ -36,7 +36,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="Badger MCP Server")
     parser.add_argument(
-        "--graphdb-endpoint",
+        "--endpoint", "-e",
         type=str,
         default=None,
         help="Graph database endpoint URL (default: from BADGER_GRAPHDB_ENDPOINT env or config)"
@@ -77,7 +77,7 @@ def main():
     # Run server
     try:
         asyncio.run(run_mcp_server(
-            dgraph_endpoint=args.graphdb_endpoint,
+            dgraph_endpoint=args.endpoint,
             workspace_path=args.workspace,
             auto_index=args.auto_index
         ))

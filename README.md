@@ -144,11 +144,11 @@ This command:
 Start the MCP server manually (typically invoked automatically by Cursor).
 
 ```bash
-badger mcp-server [--graphdb-endpoint URL] [--workspace PATH] [--auto-index] [--verbose]
+badger mcp-server [--endpoint URL] [--workspace PATH] [--auto-index] [--verbose]
 ```
 
 Options:
-- `--graphdb-endpoint`: Graph database endpoint URL (default: local from `.badgerrc` or http://localhost:8080)
+- `--endpoint`: Graph database endpoint URL (default: local from `.badgerrc` or http://localhost:8080)
 - `--workspace`: Path to workspace/codebase root (default: current directory)
 - `--auto-index`: Enable automatic indexing on startup
 - `--verbose`: Enable verbose logging

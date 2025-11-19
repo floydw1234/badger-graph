@@ -689,7 +689,7 @@ def mcp(
         "command": python_path,
         "args": [
             mcp_script_path,
-            "--graphdb-endpoint", endpoint,
+            "--endpoint", endpoint,
             "--workspace", workspace
         ]
     }
@@ -754,7 +754,7 @@ def mcp(
 
 @app.command("mcp-server")
 def mcp_server(
-    graphdb_endpoint: Optional[str] = typer.Option(None, "--graphdb-endpoint", help="Graph database endpoint URL (default: local from .badgerrc or http://localhost:8080)"),
+    endpoint: Optional[str] = typer.Option(None, "--endpoint", "-e", help="Graph database endpoint URL (default: local from .badgerrc or http://localhost:8080)"),
     workspace_path: Optional[Path] = typer.Option(None, "--workspace", "-w", help="Path to workspace/codebase root (default: current directory or BADGER_WORKSPACE_PATH env var)"),
     auto_index: bool = typer.Option(False, "--auto-index", help="Enable automatic indexing on startup"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
@@ -783,7 +783,8 @@ def mcp_server(
     config = load_config()
     
     # Use endpoint from command line, config, or default to local
-    endpoint = graphdb_endpoint or (config.graphdb_endpoint if config else None) or "http://localhost:8080"
+    if not endpoint:
+        endpoint = config.graphdb_endpoint if config else "http://localhost:8080"
     
     # Determine workspace path
     workspace = str(workspace_path.resolve()) if workspace_path else None
