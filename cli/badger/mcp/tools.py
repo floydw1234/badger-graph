@@ -190,16 +190,16 @@ async def find_symbol_usages(
             func_list = result.get("func", [])
             if not isinstance(func_list, list):
                 func_list = [func_list] if func_list else []
-            
-            for func in func_list:
-                # Add the function definition itself
-                usages.append({
-                    "type": "definition",
-                    "file": func.get("file", ""),
-                    "line": func.get("line", 0),
-                    "context": func.get("signature", "")
-                })
                 
+                for func in func_list:
+                    # Add the function definition itself
+                    usages.append({
+                        "type": "definition",
+                        "file": func.get("file", ""),
+                        "line": func.get("line", 0),
+                        "context": func.get("signature", "")
+                    })
+                    
                 # Add callers (from inverse relationship)
                 callers = func.get("calledByFunction", [])
                 if not isinstance(callers, list):
@@ -490,20 +490,20 @@ async def get_include_dependencies(
                 
                 # For each import, find files that include it
                 modules = [imp.get("module") for imp in imports if imp and imp.get("module")]
-                
+                    
                 # Query all files and filter (Dgraph doesn't support nested filters)
                 all_files_query = """
                 query {
-                    files: queryFile(first: 10000) {
-                        path
+                        files: queryFile(first: 10000) {
+                            path
                         containsImport {
-                            module
+                                module
+                            }
                         }
                     }
-                }
-                """
+                    """
                 all_files_result = dgraph_client.execute_graphql_query(all_files_query, {})
-                
+                    
                 if "files" in all_files_result:
                     for importer_file in all_files_result["files"] or []:
                         importer_path = importer_file.get("path", "")
@@ -518,9 +518,9 @@ async def get_include_dependencies(
                         for imp in importer_imports:
                             if imp and imp.get("module") in modules:
                                 dependencies.append({
-                                    "file": importer_path,
+                                        "file": importer_path,
                                     "module": imp.get("module"),
-                                    "depth": depth + 1,
+                                        "depth": depth + 1,
                                     "reason": f"Includes {imp.get('module')}"
                                 })
                                 # Recursively find includers of this file
@@ -682,36 +682,36 @@ async def get_function_callers(
                         "line": caller.get("line", 0),
                         "signature": caller.get("signature", "")
                     })
-            
-            # For indirect callers (function pointers), query variables
-            if include_indirect:
-                var_query = """
-                query {
-                    variables: queryVariable(first: 1000) {
-                        id
-                        name
-                        type
-                        file
-                        line
-                    }
-                }
-                """
-                var_result = dgraph_client.execute_graphql_query(var_query, {})
                 
-                if "variables" in var_result:
-                    var_list = var_result["variables"] if isinstance(var_result["variables"], list) else [var_result["variables"]]
-                    for var in var_list:
-                        var_type = var.get("type", "")
-                        var_name = var.get("name", "")
+            # For indirect callers (function pointers), query variables
+                if include_indirect:
+                    var_query = """
+                    query {
+                        variables: queryVariable(first: 1000) {
+                            id
+                            name
+                            type
+                            file
+                            line
+                        }
+                    }
+                    """
+                    var_result = dgraph_client.execute_graphql_query(var_query, {})
+                    
+                    if "variables" in var_result:
+                        var_list = var_result["variables"] if isinstance(var_result["variables"], list) else [var_result["variables"]]
+                        for var in var_list:
+                            var_type = var.get("type", "")
+                            var_name = var.get("name", "")
                         # Simple heuristic for function pointers
-                        if function_name in var_name or "(*" in var_type or "function" in var_type.lower():
-                            indirect_callers.append({
-                                "type": "indirect",
-                                "variable": var_name,
-                                "file": var.get("file", ""),
-                                "line": var.get("line", 0),
-                                "context": f"Possible function pointer: {var_type}"
-                            })
+                            if function_name in var_name or "(*" in var_type or "function" in var_type.lower():
+                                indirect_callers.append({
+                                    "type": "indirect",
+                                    "variable": var_name,
+                                    "file": var.get("file", ""),
+                                    "line": var.get("line", 0),
+                                    "context": f"Possible function pointer: {var_type}"
+                                })
         
         return {
             "callers": callers,
@@ -842,18 +842,18 @@ async def check_affected_files(
         for changed_file in changed_files:
             # Simple query: find the file
             query = """
-            query($filePath: String!) {
-                file: queryFile(filter: {path: {eq: $filePath}}, first: 1) {
-                    id
-                    path
-                    containsFunction {
-                        name
+                query($filePath: String!) {
+                    file: queryFile(filter: {path: {eq: $filePath}}, first: 1) {
+                        id
+                        path
+                        containsFunction {
+                            name
+                        }
                     }
                 }
-            }
-            """
+                """
             result = dgraph_client.execute_graphql_query(query, {"filePath": changed_file})
-            
+                
             if not result.get("file"):
                 continue
             
@@ -888,13 +888,13 @@ async def check_affected_files(
                 for caller in callers_result.get("callers", []):
                     caller_file = caller.get("file", "")
                     if caller_file and caller_file != file_path:
-                        affected_files.add(caller_file)
-                        by_type["function_call"].append({
-                            "file": caller_file,
-                            "reason": f"Calls function {func_name}",
-                            "changed_file": changed_file,
-                            "function": func_name
-                        })
+                            affected_files.add(caller_file)
+                            by_type["function_call"].append({
+                                "file": caller_file,
+                                "reason": f"Calls function {func_name}",
+                                "changed_file": changed_file,
+                                "function": func_name
+                            })
         
         return {
             "affected_files": sorted(list(affected_files)),

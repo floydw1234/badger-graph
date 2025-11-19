@@ -61,6 +61,7 @@ def get_graph():
         client = get_dgraph_client()
         
         # Query all nodes and relationships using GraphQL
+        # Note: Schema requires path to be non-null, but we filter empty paths in Python as a safety measure
         query = """
         {
             files: queryFile {
@@ -112,7 +113,18 @@ def get_graph():
         }
         """
         
-        result = client.execute_graphql_query(query)
+        try:
+            result = client.execute_graphql_query(query)
+        except Exception as query_ex:
+            logger.error(f"GraphQL query exception: {query_ex}")
+            return jsonify({"elements": [], "error": "Query failed. Some File nodes may be missing required fields. Try re-indexing."}), 200
+        
+        # If query failed or returned empty, return empty graph with helpful message
+        if not result or "files" not in result:
+            logger.warning("GraphQL query returned no files or failed.")
+            logger.warning("This may indicate some File nodes are missing the 'path' field.")
+            logger.warning("Try: badger clear (to remove old data), then badger index (to re-index)")
+            return jsonify({"elements": [], "error": "No files found. Try clearing and re-indexing: 'badger clear' then 'badger index'"})
         
         # Convert to Cytoscape.js format
         elements = []
@@ -123,6 +135,11 @@ def get_graph():
             for file_node in result["files"]:
                 file_uid = file_node.get("id")
                 file_path = file_node.get("path", "")
+                
+                # Skip files without path (shouldn't happen with filter, but be safe)
+                if not file_path:
+                    logger.warning(f"Skipping file node {file_uid} without path field")
+                    continue
                 
                 if file_uid and file_uid not in node_ids:
                     elements.append({
