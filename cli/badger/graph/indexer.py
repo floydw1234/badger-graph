@@ -8,6 +8,7 @@ from ..parsers import PythonParser, CParser, BaseParser
 from ..utils import find_source_files, detect_language
 from .builder import build_graph, GraphData
 from .dgraph import DgraphClient
+from .hash_cache import HashCache
 from ..parsers.base import ParseResult
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,8 @@ def index_workspace(
     workspace_path: Path,
     dgraph_client: DgraphClient,
     language: Optional[str] = None,
-    auto_index: bool = True
+    auto_index: bool = True,
+    strict_validation: bool = True
 ) -> Tuple[list[ParseResult], GraphData]:
     """Index a workspace and optionally update the graph database.
     
@@ -94,7 +96,14 @@ def index_workspace(
     if auto_index and dgraph_client:
         logger.info("Inserting graph into database")
         try:
-            if dgraph_client.insert_graph(graph_data):
+            # Initialize hash cache for incremental indexing
+            cache_file = workspace_path / ".badger-index" / "node_hashes.json"
+            hash_cache = HashCache(cache_file)
+            
+            if hash_cache.get_cache_size() > 0:
+                logger.info(f"Hash cache: {hash_cache.get_cache_size()} nodes cached")
+            
+            if dgraph_client.insert_graph(graph_data, strict_validation=strict_validation, hash_cache=hash_cache):
                 logger.info(f"Successfully indexed {len(parse_results)} files")
                 logger.info(f"  - {len(graph_data.functions)} functions")
                 logger.info(f"  - {len(graph_data.classes)} classes")
@@ -105,8 +114,13 @@ def index_workspace(
                     logger.info(f"  - {len(graph_data.variables)} variables")
             else:
                 logger.error("Failed to insert graph into database")
+        except ValueError as e:
+            # Validation error in strict mode
+            logger.error(f"Validation error: {e}", exc_info=True)
+            raise
         except Exception as e:
             logger.error(f"Error inserting graph: {e}", exc_info=True)
+            raise
     
     return parse_results, graph_data
 

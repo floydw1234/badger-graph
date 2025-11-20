@@ -14,6 +14,12 @@ import pydgraph
 import requests
 
 from .builder import GraphData
+from .validation import (
+    create_file_node, create_function_node, create_class_node,
+    create_import_node, create_macro_node, create_variable_node,
+    create_typedef_node, create_struct_field_access_node
+)
+from .hash_cache import HashCache, calculate_node_hash
 from ..embeddings.service import EmbeddingService
 from typing import TYPE_CHECKING
 
@@ -241,11 +247,14 @@ class DgraphClient:
             logger.error(f"Traceback: {traceback.format_exc()}")
             return {}
     
-    def insert_graph(self, graph_data: GraphData) -> bool:
+    def insert_graph(self, graph_data: GraphData, strict_validation: bool = True, hash_cache: Optional[HashCache] = None) -> bool:
         """Insert graph data into Dgraph.
         
         Args:
             graph_data: Graph data to insert
+            strict_validation: If True, raise exceptions on validation failures.
+                             If False (default), skip invalid nodes with warnings.
+            hash_cache: Optional hash cache for incremental indexing
         
         Returns:
             True if successful, False otherwise
@@ -254,6 +263,13 @@ class DgraphClient:
         if not self.setup_graphql_schema():
             logger.error("Failed to setup GraphQL schema")
             return False
+        
+        # Track validation failures and cache statistics
+        validation_failures = []
+        cache_stats = {
+            "skipped": 0,
+            "inserted": 0
+        }
         
         # Build UID maps for all nodes
         file_uids = {}
@@ -270,70 +286,73 @@ class DgraphClient:
         
         # Create File nodes
         for file_data in graph_data.files:
-            file_path = file_data["path"]
+            # Check hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("File", file_data)
+                if hash_cache.has_hash(node_hash):
+                    cache_stats["skipped"] += 1
+                    # Still need to track the file UID for relationships
+                    file_path = file_data.get("path", "")
+                    if file_path:
+                        file_uid = self._generate_uid(file_path)
+                        file_uids[file_path] = file_uid
+                    continue
+            
+            file_node = create_file_node(file_data)
+            if not file_node:
+                validation_failures.append(("File", file_data.get("path", "unknown")))
+                if strict_validation:
+                    raise ValueError(f"Invalid File node: {file_data.get('path', 'unknown')}")
+                continue
+            
+            file_path = file_node.path
             file_uid = self._generate_uid(file_path)
             file_uids[file_path] = file_uid
             
-            node = {
-                "uid": f"_:{file_uid}",
-                "dgraph.type": "File",
-                "File.path": file_path,
-                "File.functionsCount": file_data.get("functions_count", 0),
-                "File.classesCount": file_data.get("classes_count", 0),
-                "File.importsCount": file_data.get("imports_count", 0),
-                "File.macrosCount": file_data.get("macros_count", 0),
-                "File.variablesCount": file_data.get("variables_count", 0),
-                "File.typedefsCount": file_data.get("typedefs_count", 0),
-                "File.structFieldAccessesCount": file_data.get("struct_field_accesses_count", 0),
-                "File.astNodes": file_data.get("ast_nodes", 0),
-            }
+            node = file_node.to_dgraph_dict(file_uid)
             nodes.append(node)
+            cache_stats["inserted"] += 1
+            
+            # Add to hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("File", file_data)
+                hash_cache.add_hash(node_hash)
         
         # Create Function nodes
         for func_data in graph_data.functions:
-            func_name = func_data["name"]
-            func_file = func_data.get("file", "")
-            func_line = func_data.get("line", 0)
+            # Check hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Function", func_data)
+                if hash_cache.has_hash(node_hash):
+                    cache_stats["skipped"] += 1
+                    # Still need to track the function UID for relationships
+                    func_name = func_data.get("name", "")
+                    func_file = func_data.get("file", "")
+                    if func_name and func_file:
+                        func_uid = self._generate_uid(f"{func_name}@{func_file}")
+                        function_uids[(func_name, func_file)] = func_uid
+                    continue
             
-            # Ensure file and line are always present (they should be from builder)
-            if not func_file:
-                logger.warning(f"Function {func_name} missing file path, skipping")
+            func_node = create_function_node(func_data)
+            if not func_node:
+                validation_failures.append(("Function", func_data.get("name", "unknown"), func_data.get("file", "unknown")))
+                if strict_validation:
+                    raise ValueError(f"Invalid Function node: {func_data.get('name', 'unknown')} in {func_data.get('file', 'unknown')}")
                 continue
-            if func_line == 0:
-                logger.warning(f"Function {func_name} in {func_file} has invalid line number (0), using 1")
-                func_line = 1
             
+            func_name = func_node.name
+            func_file = func_node.file
             func_uid = self._generate_uid(f"{func_name}@{func_file}")
             function_uids[(func_name, func_file)] = func_uid
-            
-            node = {
-                "uid": f"_:{func_uid}",
-                "dgraph.type": "Function",
-                "Function.name": func_name,
-                "Function.file": func_file,
-                "Function.line": func_line,
-                "Function.column": func_data.get("column", 0),
-            }
-            
-            # Add optional fields
-            if "signature" in func_data:
-                node["Function.signature"] = func_data["signature"]
-            if "parameters" in func_data:
-                node["Function.parameters"] = json.dumps(func_data["parameters"]) if isinstance(func_data["parameters"], list) else func_data["parameters"]
-            if "return_type" in func_data:
-                node["Function.returnType"] = func_data["return_type"]
-            if "docstring" in func_data:
-                node["Function.docstring"] = func_data["docstring"]
-            # Note: belongs_to_class is set later as a UID reference after classes are created
             
             # Generate embedding
             try:
                 embedding_service = self._get_embedding_service()
-                logger.info(f"Generating embedding for function '{func_name}' with signature={func_data.get('signature')}, docstring={func_data.get('docstring')}")
+                logger.info(f"Generating embedding for function '{func_name}' with signature={func_node.signature}, docstring={func_node.docstring}")
                 embedding = embedding_service.generate_function_embedding(
                     name=func_name,
-                    signature=func_data.get("signature"),
-                    docstring=func_data.get("docstring")
+                    signature=func_node.signature,
+                    docstring=func_node.docstring
                 )
                 if embedding is not None and len(embedding) > 0:
                     # For float32vector type, convert numpy array to list of Python floats
@@ -355,7 +374,7 @@ class DgraphClient:
                             isinstance(x, float) and not (np.isnan(x) or np.isinf(x)) 
                             for x in embedding_list
                         ):
-                            node["Function.embedding"] = embedding_list
+                            func_node.embedding = embedding_list
                             logger.info(f"Successfully generated embedding for function '{func_name}' (dimension: {len(embedding_list)})")
                         else:
                             logger.warning(f"Invalid embedding for function '{func_name}': dimension={len(embedding_list)}, expected={EmbeddingService.EMBEDDING_DIMENSION}, contains_nan={any(np.isnan(x) for x in embedding_list) if len(embedding_list) > 0 else False}")
@@ -367,37 +386,53 @@ class DgraphClient:
                 logger.warning(f"Failed to generate embedding for function '{func_name}': {e}", exc_info=True)
                 # Continue without embedding rather than failing the entire insertion
             
+            # Store belongs_to_class for later relationship creation
+            if func_node.belongs_to_class:
+                func_data["belongs_to_class"] = func_node.belongs_to_class
+            
+            node = func_node.to_dgraph_dict(func_uid)
             nodes.append(node)
+            cache_stats["inserted"] += 1
+            
+            # Add to hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Function", func_data)
+                hash_cache.add_hash(node_hash)
         
         # Create Class nodes
         for cls_data in graph_data.classes:
-            cls_name = cls_data["name"]
-            cls_file = cls_data["file"]
+            # Check hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Class", cls_data)
+                if hash_cache.has_hash(node_hash):
+                    cache_stats["skipped"] += 1
+                    # Still need to track the class UID for relationships
+                    cls_name = cls_data.get("name", "")
+                    cls_file = cls_data.get("file", "")
+                    if cls_name and cls_file:
+                        cls_uid = self._generate_uid(f"{cls_name}@{cls_file}")
+                        class_uids[(cls_name, cls_file)] = cls_uid
+                    continue
+            
+            cls_node = create_class_node(cls_data)
+            if not cls_node:
+                validation_failures.append(("Class", cls_data.get("name", "unknown"), cls_data.get("file", "unknown")))
+                if strict_validation:
+                    raise ValueError(f"Invalid Class node: {cls_data.get('name', 'unknown')} in {cls_data.get('file', 'unknown')}")
+                continue
+            
+            cls_name = cls_node.name
+            cls_file = cls_node.file
             cls_uid = self._generate_uid(f"{cls_name}@{cls_file}")
             class_uids[(cls_name, cls_file)] = cls_uid
-            
-            node = {
-                "uid": f"_:{cls_uid}",
-                "dgraph.type": "Class",
-                "Class.name": cls_name,
-                "Class.file": cls_file,
-                "Class.line": cls_data.get("line", 0),
-                "Class.column": cls_data.get("column", 0),
-            }
-            
-            # Add optional fields
-            if "methods" in cls_data:
-                node["Class.methods"] = cls_data["methods"]
-            if "base_classes" in cls_data:
-                node["Class.baseClasses"] = cls_data["base_classes"]
             
             # Generate embedding
             try:
                 embedding_service = self._get_embedding_service()
-                logger.info(f"Generating embedding for class '{cls_name}' with methods={cls_data.get('methods')}")
+                logger.info(f"Generating embedding for class '{cls_name}' with methods={cls_node.methods}")
                 embedding = embedding_service.generate_class_embedding(
                     name=cls_name,
-                    methods=cls_data.get("methods")
+                    methods=cls_node.methods
                 )
                 if embedding is not None and len(embedding) > 0:
                     # For float32vector type, convert numpy array to list of Python floats
@@ -419,7 +454,7 @@ class DgraphClient:
                             isinstance(x, float) and not (np.isnan(x) or np.isinf(x)) 
                             for x in embedding_list
                         ):
-                            node["Class.embedding"] = embedding_list
+                            cls_node.embedding = embedding_list
                             logger.info(f"Successfully generated embedding for class '{cls_name}' (dimension: {len(embedding_list)})")
                         else:
                             logger.warning(f"Invalid embedding for class '{cls_name}': dimension={len(embedding_list)}, expected={EmbeddingService.EMBEDDING_DIMENSION}, contains_nan={any(np.isnan(x) for x in embedding_list) if len(embedding_list) > 0 else False}")
@@ -431,161 +466,215 @@ class DgraphClient:
                 logger.warning(f"Failed to generate embedding for class '{cls_name}': {e}", exc_info=True)
                 # Continue without embedding rather than failing the entire insertion
             
+            node = cls_node.to_dgraph_dict(cls_uid)
             nodes.append(node)
+            cache_stats["inserted"] += 1
+            
+            # Add to hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Class", cls_data)
+                hash_cache.add_hash(node_hash)
         
         # Create Import nodes
         for imp_data in graph_data.imports:
-            imp_file = imp_data["file"]
-            imp_module = imp_data.get("module", "")
-            imp_line = imp_data.get("line", 0)
+            # Check hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Import", imp_data)
+                if hash_cache.has_hash(node_hash):
+                    cache_stats["skipped"] += 1
+                    # Still need to track the import UID for relationships
+                    imp_module = imp_data.get("module", "")
+                    imp_file = imp_data.get("file", "")
+                    imp_line = imp_data.get("line", 0)
+                    if imp_module and imp_file:
+                        imp_uid = self._generate_uid(f"{imp_module}@{imp_file}@{imp_line}")
+                        import_uids[(imp_module, imp_file, imp_line)] = imp_uid
+                    continue
+            
+            imp_node = create_import_node(imp_data)
+            if not imp_node:
+                validation_failures.append(("Import", imp_data.get("module", "unknown"), imp_data.get("file", "unknown")))
+                if strict_validation:
+                    raise ValueError(f"Invalid Import node: {imp_data.get('module', 'unknown')} in {imp_data.get('file', 'unknown')}")
+                continue
+            
+            imp_module = imp_node.module
+            imp_file = imp_node.file
+            imp_line = imp_node.line
             imp_uid = self._generate_uid(f"{imp_module}@{imp_file}@{imp_line}")
             import_uids[(imp_module, imp_file, imp_line)] = imp_uid
             
-            node = {
-                "uid": f"_:{imp_uid}",
-                "dgraph.type": "Import",
-                "Import.file": imp_file,
-                "Import.line": imp_line,
-            }
-            
-            # Add optional fields
-            if "module" in imp_data:
-                node["Import.module"] = imp_data["module"]
-            if "text" in imp_data:
-                node["Import.text"] = imp_data["text"]
-            if "imported_items" in imp_data:
-                node["Import.importedItems"] = imp_data["imported_items"]
-            if "alias" in imp_data:
-                node["Import.alias"] = imp_data["alias"]
-            
+            node = imp_node.to_dgraph_dict(imp_uid)
             nodes.append(node)
+            cache_stats["inserted"] += 1
+            
+            # Add to hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Import", imp_data)
+                hash_cache.add_hash(node_hash)
         
         # Create Macro nodes
         for macro_data in graph_data.macros:
-            macro_name = macro_data["name"]
-            macro_file = macro_data.get("file", "")
-            macro_line = macro_data.get("line", 0)
+            # Check hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Macro", macro_data)
+                if hash_cache.has_hash(node_hash):
+                    cache_stats["skipped"] += 1
+                    # Still need to track the macro UID for relationships
+                    macro_name = macro_data.get("name", "")
+                    macro_file = macro_data.get("file", "")
+                    macro_line = macro_data.get("line", 0)
+                    if macro_name and macro_file:
+                        macro_uid = self._generate_uid(f"{macro_name}@{macro_file}@{macro_line}")
+                        macro_uids[(macro_name, macro_file, macro_line)] = macro_uid
+                    continue
             
-            if not macro_file:
-                logger.warning(f"Macro {macro_name} missing file path, skipping")
+            macro_node = create_macro_node(macro_data)
+            if not macro_node:
+                validation_failures.append(("Macro", macro_data.get("name", "unknown"), macro_data.get("file", "unknown")))
+                if strict_validation:
+                    raise ValueError(f"Invalid Macro node: {macro_data.get('name', 'unknown')} in {macro_data.get('file', 'unknown')}")
                 continue
-            if macro_line == 0:
-                logger.warning(f"Macro {macro_name} in {macro_file} has invalid line number (0), using 1")
-                macro_line = 1
             
+            macro_name = macro_node.name
+            macro_file = macro_node.file
+            macro_line = macro_node.line
             macro_uid = self._generate_uid(f"{macro_name}@{macro_file}@{macro_line}")
             macro_uids[(macro_name, macro_file, macro_line)] = macro_uid
             
-            node = {
-                "uid": f"_:{macro_uid}",
-                "dgraph.type": "Macro",
-                "Macro.name": macro_name,
-                "Macro.file": macro_file,
-                "Macro.line": macro_line,
-                "Macro.column": macro_data.get("column", 0),
-            }
-            
-            if "value" in macro_data:
-                node["Macro.value"] = macro_data["value"]
-            if "parameters" in macro_data:
-                node["Macro.parameters"] = macro_data["parameters"]
-            
+            node = macro_node.to_dgraph_dict(macro_uid)
             nodes.append(node)
+            cache_stats["inserted"] += 1
+            
+            # Add to hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Macro", macro_data)
+                hash_cache.add_hash(node_hash)
         
         # Create Variable nodes
         for var_data in graph_data.variables:
-            var_name = var_data["name"]
-            var_file = var_data.get("file", "")
-            var_line = var_data.get("line", 0)
+            # Check hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Variable", var_data)
+                if hash_cache.has_hash(node_hash):
+                    cache_stats["skipped"] += 1
+                    # Still need to track the variable UID for relationships
+                    var_name = var_data.get("name", "")
+                    var_file = var_data.get("file", "")
+                    var_line = var_data.get("line", 0)
+                    if var_name and var_file:
+                        var_uid = self._generate_uid(f"{var_name}@{var_file}@{var_line}")
+                        variable_uids[(var_name, var_file, var_line)] = var_uid
+                    continue
             
-            if not var_file:
-                logger.warning(f"Variable {var_name} missing file path, skipping")
+            var_node = create_variable_node(var_data)
+            if not var_node:
+                validation_failures.append(("Variable", var_data.get("name", "unknown"), var_data.get("file", "unknown")))
+                if strict_validation:
+                    raise ValueError(f"Invalid Variable node: {var_data.get('name', 'unknown')} in {var_data.get('file', 'unknown')}")
                 continue
-            if var_line == 0:
-                logger.warning(f"Variable {var_name} in {var_file} has invalid line number (0), using 1")
-                var_line = 1
             
+            var_name = var_node.name
+            var_file = var_node.file
+            var_line = var_node.line
             var_uid = self._generate_uid(f"{var_name}@{var_file}@{var_line}")
             variable_uids[(var_name, var_file, var_line)] = var_uid
             
-            node = {
-                "uid": f"_:{var_uid}",
-                "dgraph.type": "Variable",
-                "Variable.name": var_name,
-                "Variable.file": var_file,
-                "Variable.line": var_line,
-                "Variable.column": var_data.get("column", 0),
-                "Variable.isGlobal": var_data.get("is_global", False),
-            }
-            
-            if "type" in var_data:
-                node["Variable.type"] = var_data["type"]
-            if "storage_class" in var_data:
-                node["Variable.storageClass"] = var_data["storage_class"]
-            
+            node = var_node.to_dgraph_dict(var_uid)
             nodes.append(node)
+            cache_stats["inserted"] += 1
+            
+            # Add to hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Variable", var_data)
+                hash_cache.add_hash(node_hash)
         
         # Create Typedef nodes
         for tdef_data in graph_data.typedefs:
-            tdef_name = tdef_data["name"]
-            tdef_file = tdef_data.get("file", "")
-            tdef_line = tdef_data.get("line", 0)
+            # Check hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Typedef", tdef_data)
+                if hash_cache.has_hash(node_hash):
+                    cache_stats["skipped"] += 1
+                    # Still need to track the typedef UID for relationships
+                    tdef_name = tdef_data.get("name", "")
+                    tdef_file = tdef_data.get("file", "")
+                    tdef_line = tdef_data.get("line", 0)
+                    if tdef_name and tdef_file:
+                        tdef_uid = self._generate_uid(f"{tdef_name}@{tdef_file}@{tdef_line}")
+                        typedef_uids[(tdef_name, tdef_file, tdef_line)] = tdef_uid
+                    continue
             
-            if not tdef_file:
-                logger.warning(f"Typedef {tdef_name} missing file path, skipping")
+            tdef_node = create_typedef_node(tdef_data)
+            if not tdef_node:
+                validation_failures.append(("Typedef", tdef_data.get("name", "unknown"), tdef_data.get("file", "unknown")))
+                if strict_validation:
+                    raise ValueError(f"Invalid Typedef node: {tdef_data.get('name', 'unknown')} in {tdef_data.get('file', 'unknown')}")
                 continue
-            if tdef_line == 0:
-                logger.warning(f"Typedef {tdef_name} in {tdef_file} has invalid line number (0), using 1")
-                tdef_line = 1
             
+            tdef_name = tdef_node.name
+            tdef_file = tdef_node.file
+            tdef_line = tdef_node.line
             tdef_uid = self._generate_uid(f"{tdef_name}@{tdef_file}@{tdef_line}")
             typedef_uids[(tdef_name, tdef_file, tdef_line)] = tdef_uid
             
-            node = {
-                "uid": f"_:{tdef_uid}",
-                "dgraph.type": "Typedef",
-                "Typedef.name": tdef_name,
-                "Typedef.file": tdef_file,
-                "Typedef.line": tdef_line,
-                "Typedef.column": tdef_data.get("column", 0),
-            }
-            
-            if "underlying_type" in tdef_data:
-                node["Typedef.underlyingType"] = tdef_data["underlying_type"]
-            
+            node = tdef_node.to_dgraph_dict(tdef_uid)
             nodes.append(node)
+            cache_stats["inserted"] += 1
+            
+            # Add to hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("Typedef", tdef_data)
+                hash_cache.add_hash(node_hash)
         
         # Create StructFieldAccess nodes
         for sfa_data in graph_data.struct_field_accesses:
-            struct_name = sfa_data["struct_name"]
-            field_name = sfa_data["field_name"]
-            sfa_file = sfa_data.get("file", "")
-            sfa_line = sfa_data.get("line", 0)
+            # Check hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("StructFieldAccess", sfa_data)
+                if hash_cache.has_hash(node_hash):
+                    cache_stats["skipped"] += 1
+                    # Still need to track the struct field access UID for relationships
+                    struct_name = sfa_data.get("struct_name", "")
+                    field_name = sfa_data.get("field_name", "")
+                    sfa_file = sfa_data.get("file", "")
+                    sfa_line = sfa_data.get("line", 0)
+                    if struct_name and field_name and sfa_file:
+                        sfa_uid = self._generate_uid(f"{struct_name}.{field_name}@{sfa_file}@{sfa_line}")
+                        struct_field_access_uids[(struct_name, field_name, sfa_file, sfa_line)] = sfa_uid
+                    continue
             
-            if not sfa_file:
-                logger.warning(f"StructFieldAccess {struct_name}.{field_name} missing file path, skipping")
+            sfa_node = create_struct_field_access_node(sfa_data)
+            if not sfa_node:
+                validation_failures.append(("StructFieldAccess", f"{sfa_data.get('struct_name', 'unknown')}.{sfa_data.get('field_name', 'unknown')}", sfa_data.get("file", "unknown")))
+                if strict_validation:
+                    raise ValueError(f"Invalid StructFieldAccess node: {sfa_data.get('struct_name', 'unknown')}.{sfa_data.get('field_name', 'unknown')} in {sfa_data.get('file', 'unknown')}")
                 continue
-            if sfa_line == 0:
-                logger.warning(f"StructFieldAccess {struct_name}.{field_name} in {sfa_file} has invalid line number (0), using 1")
-                sfa_line = 1
             
+            struct_name = sfa_node.struct_name
+            field_name = sfa_node.field_name
+            sfa_file = sfa_node.file
+            sfa_line = sfa_node.line
             sfa_uid = self._generate_uid(f"{struct_name}.{field_name}@{sfa_file}@{sfa_line}")
             struct_field_access_uids[(struct_name, field_name, sfa_file, sfa_line)] = sfa_uid
             
-            node = {
-                "uid": f"_:{sfa_uid}",
-                "dgraph.type": "StructFieldAccess",
-                "StructFieldAccess.structName": struct_name,
-                "StructFieldAccess.fieldName": field_name,
-                "StructFieldAccess.file": sfa_file,
-                "StructFieldAccess.line": sfa_line,
-                "StructFieldAccess.column": sfa_data.get("column", 0),
-            }
-            
-            if "access_type" in sfa_data:
-                node["StructFieldAccess.accessType"] = sfa_data["access_type"]
-            
+            node = sfa_node.to_dgraph_dict(sfa_uid)
             nodes.append(node)
+            cache_stats["inserted"] += 1
+            
+            # Add to hash cache
+            if hash_cache:
+                node_hash = calculate_node_hash("StructFieldAccess", sfa_data)
+                hash_cache.add_hash(node_hash)
+        
+        # Create sets of UIDs that are actually being inserted (not skipped)
+        # This prevents creating relationships to nodes that don't exist in the current mutation
+        inserted_function_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Function"}
+        inserted_class_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Class"}
+        inserted_import_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Import"}
+        inserted_macro_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Macro"}
+        inserted_variable_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Variable"}
+        inserted_typedef_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Typedef"}
         
         # Add relationships
         relationship_stats = {
@@ -635,23 +724,25 @@ class DgraphClient:
                                 break
                     
                     if callee_uid:
-                        # Add relationship to caller node (callsFunction)
-                        for node in nodes:
-                            if node.get("uid") == f"_:{caller_uid}":
-                                if "Function.callsFunction" not in node:
-                                    node["Function.callsFunction"] = []
-                                node["Function.callsFunction"].append({"uid": f"_:{callee_uid}"})
-                                relationship_stats["function_call"]["created"] += 1
-                                break
-                        
-                        # Explicitly add inverse relationship (calledByFunction)
-                        # Dgraph's @hasInverse may not auto-populate, so we do it explicitly
-                        for node in nodes:
-                            if node.get("uid") == f"_:{callee_uid}":
-                                if "Function.calledByFunction" not in node:
-                                    node["Function.calledByFunction"] = []
-                                node["Function.calledByFunction"].append({"uid": f"_:{caller_uid}"})
-                                break
+                        # Only add relationships if both nodes are actually being inserted
+                        if caller_uid in inserted_function_uids and callee_uid in inserted_function_uids:
+                            # Add relationship to caller node (callsFunction)
+                            for node in nodes:
+                                if node.get("uid") == f"_:{caller_uid}":
+                                    if "Function.callsFunction" not in node:
+                                        node["Function.callsFunction"] = []
+                                    node["Function.callsFunction"].append({"uid": f"_:{callee_uid}"})
+                                    relationship_stats["function_call"]["created"] += 1
+                                    break
+                            
+                            # Explicitly add inverse relationship (calledByFunction)
+                            # Dgraph's @hasInverse may not auto-populate, so we do it explicitly
+                            for node in nodes:
+                                if node.get("uid") == f"_:{callee_uid}":
+                                    if "Function.calledByFunction" not in node:
+                                        node["Function.calledByFunction"] = []
+                                    node["Function.calledByFunction"].append({"uid": f"_:{caller_uid}"})
+                                    break
                     else:
                         relationship_stats["function_call"]["callee_not_found"] += 1
                         logger.debug(
@@ -680,22 +771,24 @@ class DgraphClient:
                             break
                     
                     if base_uid:
-                        # Add inheritance relationship (inheritsClass)
-                        for node in nodes:
-                            if node.get("uid") == f"_:{derived_uid}":
-                                if "Class.inheritsClass" not in node:
-                                    node["Class.inheritsClass"] = []
-                                node["Class.inheritsClass"].append({"uid": f"_:{base_uid}"})
-                                break
-                        
-                        # Explicitly add inverse relationship (inheritedByClass)
-                        # Dgraph's @hasInverse may not auto-populate, so we do it explicitly
-                        for node in nodes:
-                            if node.get("uid") == f"_:{base_uid}":
-                                if "Class.inheritedByClass" not in node:
-                                    node["Class.inheritedByClass"] = []
-                                node["Class.inheritedByClass"].append({"uid": f"_:{derived_uid}"})
-                                break
+                        # Only add relationships if both nodes are actually being inserted
+                        if derived_uid in inserted_class_uids and base_uid in inserted_class_uids:
+                            # Add inheritance relationship (inheritsClass)
+                            for node in nodes:
+                                if node.get("uid") == f"_:{derived_uid}":
+                                    if "Class.inheritsClass" not in node:
+                                        node["Class.inheritsClass"] = []
+                                    node["Class.inheritsClass"].append({"uid": f"_:{base_uid}"})
+                                    break
+                            
+                            # Explicitly add inverse relationship (inheritedByClass)
+                            # Dgraph's @hasInverse may not auto-populate, so we do it explicitly
+                            for node in nodes:
+                                if node.get("uid") == f"_:{base_uid}":
+                                    if "Class.inheritedByClass" not in node:
+                                        node["Class.inheritedByClass"] = []
+                                    node["Class.inheritedByClass"].append({"uid": f"_:{derived_uid}"})
+                                    break
             
             elif rel_type == "import":
                 file_path = rel.get("file")
@@ -726,13 +819,15 @@ class DgraphClient:
                 if usage_file in file_uids and matching_macro_uids:
                     file_uid = file_uids[usage_file]
                     for macro_uid in matching_macro_uids:
-                        # Add usesMacro relationship from File to Macro
-                        for node in nodes:
-                            if node.get("uid") == f"_:{file_uid}":
-                                if "File.usesMacro" not in node:
-                                    node["File.usesMacro"] = []
-                                node["File.usesMacro"].append({"uid": f"_:{macro_uid}"})
-                                break
+                        # Only add relationship if macro node is actually being inserted
+                        if macro_uid in inserted_macro_uids:
+                            # Add usesMacro relationship from File to Macro
+                            for node in nodes:
+                                if node.get("uid") == f"_:{file_uid}":
+                                    if "File.usesMacro" not in node:
+                                        node["File.usesMacro"] = []
+                                    node["File.usesMacro"].append({"uid": f"_:{macro_uid}"})
+                                    break
             
             elif rel_type == "variable_usage":
                 var_name = rel.get("variable")
@@ -756,13 +851,15 @@ class DgraphClient:
                     if func_uid and matching_var_uids:
                         # Use first matching variable (shadowing handled in builder)
                         var_uid = matching_var_uids[0][0]
-                        # Add usesVariable relationship from Function to Variable
-                        for node in nodes:
-                            if node.get("uid") == f"_:{func_uid}":
-                                if "Function.usesVariable" not in node:
-                                    node["Function.usesVariable"] = []
-                                node["Function.usesVariable"].append({"uid": f"_:{var_uid}"})
-                                break
+                        # Only add relationship if both nodes are actually being inserted
+                        if func_uid in inserted_function_uids and var_uid in inserted_variable_uids:
+                            # Add usesVariable relationship from Function to Variable
+                            for node in nodes:
+                                if node.get("uid") == f"_:{func_uid}":
+                                    if "Function.usesVariable" not in node:
+                                        node["Function.usesVariable"] = []
+                                    node["Function.usesVariable"].append({"uid": f"_:{var_uid}"})
+                                    break
             
             elif rel_type == "typedef_usage":
                 typedef_name = rel.get("typedef")
@@ -778,13 +875,15 @@ class DgraphClient:
                 if usage_file in file_uids and matching_typedef_uids:
                     file_uid = file_uids[usage_file]
                     for typedef_uid in matching_typedef_uids:
-                        # Add usesTypedef relationship from File to Typedef
-                        for node in nodes:
-                            if node.get("uid") == f"_:{file_uid}":
-                                if "File.usesTypedef" not in node:
-                                    node["File.usesTypedef"] = []
-                                node["File.usesTypedef"].append({"uid": f"_:{typedef_uid}"})
-                                break
+                        # Only add relationship if typedef node is actually being inserted
+                        if typedef_uid in inserted_typedef_uids:
+                            # Add usesTypedef relationship from File to Typedef
+                            for node in nodes:
+                                if node.get("uid") == f"_:{file_uid}":
+                                    if "File.usesTypedef" not in node:
+                                        node["File.usesTypedef"] = []
+                                    node["File.usesTypedef"].append({"uid": f"_:{typedef_uid}"})
+                                    break
         
         # Log relationship statistics
         if relationship_stats["function_call"]["total"] > 0:
@@ -795,6 +894,7 @@ class DgraphClient:
             )
         
         # Add file containment relationships and class-method relationships
+        # Only add relationships for nodes that are actually in the nodes list (not skipped)
         for func_data in graph_data.functions:
             func_file = func_data["file"]
             func_name = func_data["name"]
@@ -802,13 +902,15 @@ class DgraphClient:
                 file_uid = file_uids[func_file]
                 func_uid = function_uids[(func_name, func_file)]
                 
-                # Add file contains function relationship
-                for node in nodes:
-                    if node.get("uid") == f"_:{file_uid}":
-                        if "File.containsFunction" not in node:
-                            node["File.containsFunction"] = []
-                        node["File.containsFunction"].append({"uid": f"_:{func_uid}"})
-                        break
+                # Only add relationship if the function node is actually being inserted
+                if func_uid in inserted_function_uids:
+                    # Add file contains function relationship
+                    for node in nodes:
+                        if node.get("uid") == f"_:{file_uid}":
+                            if "File.containsFunction" not in node:
+                                node["File.containsFunction"] = []
+                            node["File.containsFunction"].append({"uid": f"_:{func_uid}"})
+                            break
                 
                 # Add class contains method relationship if this is a method
                 if "belongs_to_class" in func_data:
@@ -838,12 +940,14 @@ class DgraphClient:
                 file_uid = file_uids[cls_file]
                 cls_uid = class_uids[(cls_name, cls_file)]
                 
-                for node in nodes:
-                    if node.get("uid") == f"_:{file_uid}":
-                        if "File.containsClass" not in node:
-                            node["File.containsClass"] = []
-                        node["File.containsClass"].append({"uid": f"_:{cls_uid}"})
-                        break
+                # Only add relationship if the class node is actually being inserted
+                if cls_uid in inserted_class_uids:
+                    for node in nodes:
+                        if node.get("uid") == f"_:{file_uid}":
+                            if "File.containsClass" not in node:
+                                node["File.containsClass"] = []
+                            node["File.containsClass"].append({"uid": f"_:{cls_uid}"})
+                            break
         
         for imp_data in graph_data.imports:
             imp_file = imp_data["file"]
@@ -853,12 +957,14 @@ class DgraphClient:
                 file_uid = file_uids[imp_file]
                 imp_uid = import_uids[(imp_module, imp_file, imp_line)]
                 
-                for node in nodes:
-                    if node.get("uid") == f"_:{file_uid}":
-                        if "File.containsImport" not in node:
-                            node["File.containsImport"] = []
-                        node["File.containsImport"].append({"uid": f"_:{imp_uid}"})
-                        break
+                # Only add relationship if the import node is actually being inserted
+                if imp_uid in inserted_import_uids:
+                    for node in nodes:
+                        if node.get("uid") == f"_:{file_uid}":
+                            if "File.containsImport" not in node:
+                                node["File.containsImport"] = []
+                            node["File.containsImport"].append({"uid": f"_:{imp_uid}"})
+                            break
         
         # Add file containment relationships for macros
         for macro_data in graph_data.macros:
@@ -1142,6 +1248,26 @@ class DgraphClient:
                     except Exception as e:
                         logger.warning(f"Failed to update class embedding for {name}@{file}: {e}")
         
+        # Log validation failure summary
+        if validation_failures:
+            failure_summary = {}
+            for failure in validation_failures:
+                node_type = failure[0]
+                if node_type not in failure_summary:
+                    failure_summary[node_type] = 0
+                failure_summary[node_type] += 1
+            
+            summary_msg = ", ".join([f"{count} {node_type}(s)" for node_type, count in failure_summary.items()])
+            logger.warning(f"Validation failures (skipped): {summary_msg}")
+            if strict_validation:
+                logger.error(f"Strict validation enabled: {len(validation_failures)} node(s) failed validation")
+        
+        # Save hash cache if provided
+        if hash_cache:
+            hash_cache.save_cache()
+            if cache_stats["skipped"] > 0:
+                logger.info(f"Hash cache: skipped {cache_stats['skipped']} unchanged nodes, inserted {cache_stats['inserted']} new/updated nodes")
+        
         logger.info(f"Successfully inserted {len(nodes)} nodes into Dgraph")
         return True
     
@@ -1402,53 +1528,43 @@ class DgraphClient:
                         }
                         nodes.append(node)
                     
-                    # Create Function nodes
+                    # Create Function nodes (use validation)
                     for func_data in new_graph_data.functions:
-                        func_name = func_data["name"]
+                        # Use validation function to ensure required fields
+                        func_data_with_file = func_data.copy()
+                        func_data_with_file["file"] = file_path
+                        func_node = create_function_node(func_data_with_file)
+                        if not func_node:
+                            logger.warning(f"Invalid Function node in {file_path}:{func_data.get('line', 0)}, skipping")
+                            continue
+                        
+                        func_name = func_node.name
                         func_uid = self._generate_uid(f"{func_name}@{file_path}")
                         function_uids[(func_name, file_path)] = func_uid
-                        
-                        node = {
-                            "uid": f"_:{func_uid}",
-                            "dgraph.type": "Function",
-                            "Function.name": func_name,
-                            "Function.file": file_path,
-                            "Function.line": func_data.get("line", 0),
-                            "Function.column": func_data.get("column", 0),
-                        }
-                        
-                        if "signature" in func_data:
-                            node["Function.signature"] = func_data["signature"]
-                        if "parameters" in func_data:
-                            node["Function.parameters"] = json.dumps(func_data["parameters"]) if isinstance(func_data["parameters"], list) else func_data["parameters"]
-                        if "return_type" in func_data:
-                            node["Function.returnType"] = func_data["return_type"]
-                        if "docstring" in func_data:
-                            node["Function.docstring"] = func_data["docstring"]
                         
                         # Generate embedding
                         try:
                             embedding_service = self._get_embedding_service()
                             embedding = embedding_service.generate_function_embedding(
                                 name=func_name,
-                                signature=func_data.get("signature"),
-                                docstring=func_data.get("docstring")
+                                signature=func_node.signature,
+                                docstring=func_node.docstring
                             )
                             if embedding is not None and len(embedding) > 0:
                                 # For float32vector type, convert numpy array to list of Python floats
                                 # Dgraph expects a plain Python list for float32vector type
                                 if isinstance(embedding, np.ndarray):
                                     embedding_f32 = embedding.astype(np.float32)
-                                    node["Function.embedding"] = [float(x) for x in embedding_f32.tolist()]
+                                    func_node.embedding = [float(x) for x in embedding_f32.tolist()]
                                 elif isinstance(embedding, list):
-                                    node["Function.embedding"] = [float(x) for x in embedding]
+                                    func_node.embedding = [float(x) for x in embedding]
                                 else:
-                                    node["Function.embedding"] = [float(x) for x in list(embedding)]
+                                    func_node.embedding = [float(x) for x in list(embedding)]
                         except Exception as e:
                             logger.error(f"Failed to generate embedding for function '{func_name}': {e}")
                             raise e
-                            # Continue without embedding rather than failing the entire update
                         
+                        node = func_node.to_dgraph_dict(func_uid)
                         nodes.append(node)
                         
                         # Add relationship to file
@@ -1460,47 +1576,42 @@ class DgraphClient:
                                     n["File.containsFunction"].append({"uid": f"_:{func_uid}"})
                                     break
                     
-                    # Create Class nodes
+                    # Create Class nodes (use validation)
                     for cls_data in new_graph_data.classes:
-                        cls_name = cls_data["name"]
+                        # Use validation function to ensure required fields
+                        cls_data_with_file = cls_data.copy()
+                        cls_data_with_file["file"] = file_path
+                        cls_node = create_class_node(cls_data_with_file)
+                        if not cls_node:
+                            logger.warning(f"Invalid Class node in {file_path}:{cls_data.get('line', 0)}, skipping")
+                            continue
+                        
+                        cls_name = cls_node.name
                         cls_uid = self._generate_uid(f"{cls_name}@{file_path}")
                         class_uids[(cls_name, file_path)] = cls_uid
-                        
-                        node = {
-                            "uid": f"_:{cls_uid}",
-                            "dgraph.type": "Class",
-                            "Class.name": cls_name,
-                            "Class.file": file_path,
-                            "Class.line": cls_data.get("line", 0),
-                            "Class.column": cls_data.get("column", 0),
-                        }
-                        
-                        if "methods" in cls_data:
-                            node["Class.methods"] = cls_data["methods"]
-                        if "base_classes" in cls_data:
-                            node["Class.baseClasses"] = cls_data["base_classes"]
                         
                         # Generate embedding
                         try:
                             embedding_service = self._get_embedding_service()
                             embedding = embedding_service.generate_class_embedding(
                                 name=cls_name,
-                                methods=cls_data.get("methods")
+                                methods=cls_node.methods
                             )
                             if embedding is not None and len(embedding) > 0:
                                 # For float32vector type, convert numpy array to list of Python floats
                                 # Dgraph expects a plain Python list for float32vector type
                                 if isinstance(embedding, np.ndarray):
                                     embedding_f32 = embedding.astype(np.float32)
-                                    node["Class.embedding"] = [float(x) for x in embedding_f32.tolist()]
+                                    cls_node.embedding = [float(x) for x in embedding_f32.tolist()]
                                 elif isinstance(embedding, list):
-                                    node["Class.embedding"] = [float(x) for x in embedding]
+                                    cls_node.embedding = [float(x) for x in embedding]
                                 else:
-                                    node["Class.embedding"] = [float(x) for x in list(embedding)]
+                                    cls_node.embedding = [float(x) for x in list(embedding)]
                         except Exception as e:
                             logger.warning(f"Failed to generate embedding for class '{cls_name}': {e}")
                             # Continue without embedding rather than failing the entire update
                         
+                        node = cls_node.to_dgraph_dict(cls_uid)
                         nodes.append(node)
                         
                         # Add relationship to file
@@ -1512,29 +1623,22 @@ class DgraphClient:
                                     n["File.containsClass"].append({"uid": f"_:{cls_uid}"})
                                     break
                     
-                    # Create Import nodes
+                    # Create Import nodes (use validation)
                     for imp_data in new_graph_data.imports:
-                        imp_module = imp_data.get("module", "")
-                        imp_line = imp_data.get("line", 0)
+                        # Use validation function to ensure required fields
+                        imp_data_with_file = imp_data.copy()
+                        imp_data_with_file["file"] = file_path
+                        imp_node = create_import_node(imp_data_with_file)
+                        if not imp_node:
+                            logger.warning(f"Invalid Import node in {file_path}:{imp_data.get('line', 0)}, skipping")
+                            continue
+                        
+                        imp_module = imp_node.module
+                        imp_line = imp_node.line
                         imp_uid = self._generate_uid(f"{imp_module}@{file_path}@{imp_line}")
                         import_uids[(imp_module, file_path, imp_line)] = imp_uid
                         
-                        node = {
-                            "uid": f"_:{imp_uid}",
-                            "dgraph.type": "Import",
-                            "Import.file": file_path,
-                            "Import.line": imp_line,
-                        }
-                        
-                        if "module" in imp_data:
-                            node["Import.module"] = imp_data["module"]
-                        if "text" in imp_data:
-                            node["Import.text"] = imp_data["text"]
-                        if "imported_items" in imp_data:
-                            node["Import.importedItems"] = imp_data["imported_items"]
-                        if "alias" in imp_data:
-                            node["Import.alias"] = imp_data["alias"]
-                        
+                        node = imp_node.to_dgraph_dict(imp_uid)
                         nodes.append(node)
                         
                         # Add relationship to file

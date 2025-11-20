@@ -4,6 +4,12 @@ import logging
 import fnmatch
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set
+
+try:
+    import numpy as np  # type: ignore
+except ImportError:
+    np = None  # numpy may not be available in all environments
+
 from ..graph.dgraph import DgraphClient
 from ..embeddings.service import EmbeddingService
 
@@ -190,16 +196,16 @@ async def find_symbol_usages(
             func_list = result.get("func", [])
             if not isinstance(func_list, list):
                 func_list = [func_list] if func_list else []
+            
+            for func in func_list:
+                # Add the function definition itself
+                usages.append({
+                    "type": "definition",
+                    "file": func.get("file", ""),
+                    "line": func.get("line", 0),
+                    "context": func.get("signature", "")
+                })
                 
-                for func in func_list:
-                    # Add the function definition itself
-                    usages.append({
-                        "type": "definition",
-                        "file": func.get("file", ""),
-                        "line": func.get("line", 0),
-                        "context": func.get("signature", "")
-                    })
-                    
                 # Add callers (from inverse relationship)
                 callers = func.get("calledByFunction", [])
                 if not isinstance(callers, list):
@@ -682,36 +688,38 @@ async def get_function_callers(
                         "line": caller.get("line", 0),
                         "signature": caller.get("signature", "")
                     })
-                
+            
             # For indirect callers (function pointers), query variables
-                if include_indirect:
-                    var_query = """
-                    query {
-                        variables: queryVariable(first: 1000) {
-                            id
-                            name
-                            type
-                            file
-                            line
-                        }
+            if include_indirect:
+                var_query = """
+                query {
+                    variables: queryVariable(first: 1000) {
+                        id
+                        name
+                        type
+                        file
+                        line
                     }
-                    """
-                    var_result = dgraph_client.execute_graphql_query(var_query, {})
-                    
-                    if "variables" in var_result:
-                        var_list = var_result["variables"] if isinstance(var_result["variables"], list) else [var_result["variables"]]
-                        for var in var_list:
-                            var_type = var.get("type", "")
-                            var_name = var.get("name", "")
+                }
+                """
+                var_result = dgraph_client.execute_graphql_query(var_query, {})
+                
+                if "variables" in var_result:
+                    var_list = var_result["variables"] if isinstance(var_result["variables"], list) else [var_result["variables"]]
+                    for var in var_list:
+                        if not var:  # Skip None/empty values
+                            continue
+                        var_type = var.get("type") or ""
+                        var_name = var.get("name") or ""
                         # Simple heuristic for function pointers
-                            if function_name in var_name or "(*" in var_type or "function" in var_type.lower():
-                                indirect_callers.append({
-                                    "type": "indirect",
-                                    "variable": var_name,
-                                    "file": var.get("file", ""),
-                                    "line": var.get("line", 0),
-                                    "context": f"Possible function pointer: {var_type}"
-                                })
+                        if var_name and (function_name in var_name or "(*" in var_type or "function" in var_type.lower()):
+                            indirect_callers.append({
+                                "type": "indirect",
+                                "variable": var_name,
+                                "file": var.get("file", ""),
+                                "line": var.get("line", 0),
+                                "context": f"Possible function pointer: {var_type}"
+                            })
         
         return {
             "callers": callers,
@@ -758,8 +766,7 @@ async def semantic_code_search(
         query_embedding = embedding_service.generate_query_embedding(query)
         
         # Convert to list if numpy array
-        import numpy as np
-        if isinstance(query_embedding, np.ndarray):
+        if np is not None and isinstance(query_embedding, np.ndarray):
             query_embedding = query_embedding.tolist()
         
         # Perform vector search

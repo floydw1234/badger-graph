@@ -282,7 +282,8 @@ async def run_mcp_server(
                     config.workspace_path,
                     dgraph_client,
                     language=None,  # Auto-detect
-                    auto_index=True
+                    auto_index=True,
+                    strict_validation=True  # Default to strict for MCP server
                 )
                 if parse_results:
                     logger.info(f"Workspace indexed successfully: {len(parse_results)} files")

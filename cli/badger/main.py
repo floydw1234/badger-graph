@@ -41,7 +41,8 @@ def index_directory(
     directory: Path,
     config: BadgerConfig,
     language: Optional[str] = None,
-    dgraph_client: Optional[DgraphClient] = None
+    dgraph_client: Optional[DgraphClient] = None,
+    strict_validation: bool = True
 ) -> tuple[list, GraphData]:
     """Index a directory and return parse results and graph data."""
     console.print(f"[dim]Indexing directory: {directory}[/dim]")
@@ -171,12 +172,25 @@ def index_directory(
     if dgraph_client:
         console.print("[dim]Updating graph database...[/dim]")
         try:
-            if dgraph_client.insert_graph(graph_data):
+            # Initialize hash cache for incremental indexing
+            from .graph.hash_cache import HashCache
+            cache_file = output_dir / "node_hashes.json"
+            hash_cache = HashCache(cache_file)
+            
+            if hash_cache.get_cache_size() > 0:
+                console.print(f"[dim]Hash cache: {hash_cache.get_cache_size()} nodes cached[/dim]")
+            
+            if dgraph_client.insert_graph(graph_data, strict_validation=strict_validation, hash_cache=hash_cache):
                 console.print("[green]✓ Graph database updated[/green]")
             else:
                 console.print("[yellow]⚠ Graph database update not yet implemented[/yellow]")
+        except ValueError as e:
+            # Validation error in strict mode
+            console.print(f"[red]Validation error: {e}[/red]")
+            raise typer.Exit(1)
         except Exception as e:
             console.print(f"[red]Error updating graph database: {e}[/red]")
+            raise typer.Exit(1)
     
     return parse_results, graph_data
 
@@ -311,7 +325,7 @@ def interactive_agent(
                 elif user_input == "/index":
                     console.print("[yellow]Re-indexing directory...[/yellow]")
                     dgraph_client = DgraphClient(config.graphdb_endpoint) if config.graphdb_endpoint else None
-                    _, graph_data = index_directory(directory, config, dgraph_client=dgraph_client)
+                    _, graph_data = index_directory(directory, config, dgraph_client=dgraph_client, strict_validation=True)
                     console.print("[green]Indexing complete[/green]\n")
                     continue
             
@@ -565,6 +579,7 @@ def index(
     language: Optional[str] = typer.Option(None, "--language", "-l", help="Language to parse (python, c). Auto-detect if not specified"),
     endpoint: Optional[str] = typer.Option(None, "--endpoint", "-e", help="Graph database endpoint URL (default: local from .badgerrc or http://localhost:8080)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
+    strict: bool = typer.Option(True, "--strict/--no-strict", help="Enable strict validation (default: True). If True, fail on validation errors. If False, skip invalid nodes with warnings."),
 ):
     """Index a codebase and store it in the graph database.
     
@@ -609,7 +624,11 @@ def index(
     
     # Index directory (automatically updates graph database)
     console.print("\n[bold]Indexing codebase...[/bold]")
-    parse_results, graph_data = index_directory(work_dir, config, language, dgraph_client=dgraph_client)
+    if strict:
+        console.print("[dim]Strict validation: enabled (will fail on validation errors)[/dim]")
+    else:
+        console.print("[dim]Strict validation: disabled (will skip invalid nodes)[/dim]")
+    parse_results, graph_data = index_directory(work_dir, config, language, dgraph_client=dgraph_client, strict_validation=strict)
     
     if not parse_results:
         console.print("[yellow]No files to index.[/yellow]")
@@ -1015,15 +1034,33 @@ def status_graph(
     else:
         compose_path = work_dir / "dgraph" / "docker-compose.yml"
         if not compose_path.exists():
+            # Try looking in parent directories
             for parent in work_dir.parents:
                 candidate = parent / "dgraph" / "docker-compose.yml"
                 if candidate.exists():
                     compose_path = candidate
                     break
+            
+            # Also try looking in the badger project root (where this code lives)
+            if not compose_path.exists():
+                # __file__ is cli/badger/main.py, so go up 3 levels to get project root
+                badger_root = Path(__file__).parent.parent.parent
+                candidate = badger_root / "dgraph" / "docker-compose.yml"
+                if candidate.exists():
+                    compose_path = candidate
+                else:
+                    # Also try one more level up in case we're in a different structure
+                    badger_root_alt = badger_root.parent
+                    candidate_alt = badger_root_alt / "dgraph" / "docker-compose.yml"
+                    if candidate_alt.exists():
+                        compose_path = candidate_alt
     
     if not compose_path.exists():
         console.print(f"[red]✗ docker-compose.yml not found[/red]")
-        console.print(f"[yellow]Expected at: {compose_path}[/yellow]")
+        console.print(f"[yellow]Searched in:[/yellow]")
+        console.print(f"  - {work_dir / 'dgraph' / 'docker-compose.yml'}")
+        console.print(f"  - Parent directories of current working directory")
+        console.print(f"[yellow]Use --compose-file to specify the path[/yellow]")
         raise typer.Exit(1)
     
     compose_dir = compose_path.parent
@@ -1110,6 +1147,23 @@ def clear(
             console.print("[green]✓ GraphQL schema setup complete[/green]")
         else:
             console.print("[yellow]⚠ Schema setup may have failed. Run 'badger init_graph' if needed.[/yellow]")
+        
+        # Clear hash cache (search in current directory and common locations)
+        from .graph.hash_cache import HashCache
+        work_dir = Path.cwd()
+        cache_file = work_dir / ".badger-index" / "node_hashes.json"
+        if cache_file.exists():
+            hash_cache = HashCache(cache_file)
+            hash_cache.clear_cache()
+            console.print("[green]✓ Hash cache cleared[/green]")
+        else:
+            # Try to find cache files in subdirectories
+            cache_files = list(work_dir.rglob(".badger-index/node_hashes.json"))
+            if cache_files:
+                for cache_file in cache_files:
+                    hash_cache = HashCache(cache_file)
+                    hash_cache.clear_cache()
+                console.print(f"[green]✓ Cleared {len(cache_files)} hash cache file(s)[/green]")
             
     except Exception as e:
         console.print(f"[red]Error clearing graph: {e}[/red]")
