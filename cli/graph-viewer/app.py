@@ -61,7 +61,8 @@ def get_graph():
         client = get_dgraph_client()
         
         # Query all nodes and relationships using GraphQL
-        # Note: Schema requires path to be non-null, but we filter empty paths in Python as a safety measure
+        # Note: We filter out nodes with missing required fields in Python
+        # because Dgraph may have created empty placeholder nodes from relationship references
         query = """
         {
             files: queryFile {
@@ -108,6 +109,7 @@ def get_graph():
                     module
                     file
                     line
+                    text
                 }
             }
         }
@@ -117,6 +119,19 @@ def get_graph():
             result = client.execute_graphql_query(query)
         except Exception as query_ex:
             logger.error(f"GraphQL query exception: {query_ex}")
+            # If query fails due to missing required fields, try to handle gracefully
+            # by catching the specific error and returning a helpful message
+            error_msg = str(query_ex)
+            if "Non-nullable field" in error_msg or "was not present" in error_msg:
+                logger.warning("Query failed due to nodes with missing required fields. "
+                             "These are likely empty placeholder nodes created by relationship references. "
+                             "Try running 'badger clear' and re-indexing.")
+                return jsonify({
+                    "elements": [], 
+                    "error": "Query failed due to nodes with missing required fields. "
+                            "This can happen if empty placeholder nodes exist in the database. "
+                            "Try: 'badger clear' then 'badger index' to clean up and re-index."
+                }), 200
             return jsonify({"elements": [], "error": "Query failed. Some File nodes may be missing required fields. Try re-indexing."}), 200
         
         # If query failed or returned empty, return empty graph with helpful message
@@ -162,6 +177,11 @@ def get_graph():
                         func_uid = func.get("id")
                         func_name = func.get("name", "")
                         
+                        # Skip functions with missing required fields (empty placeholder nodes)
+                        if not func_name or not func_name.strip():
+                            logger.debug(f"Skipping function {func_uid} with empty name")
+                            continue
+                        
                         if func_uid and func_uid not in node_ids:
                             elements.append({
                                 "data": {
@@ -196,6 +216,12 @@ def get_graph():
                                 if not callee:
                                     continue
                                 callee_uid = callee.get("id")
+                                callee_name = callee.get("name", "")
+                                
+                                # Skip callees with missing required fields
+                                if not callee_name or not callee_name.strip():
+                                    logger.debug(f"Skipping callee {callee_uid} with empty name")
+                                    continue
                                 
                                 if callee_uid and callee_uid not in node_ids:
                                     # Add callee node if not already added
@@ -233,6 +259,11 @@ def get_graph():
                         cls_uid = cls.get("id")
                         cls_name = cls.get("name", "")
                         
+                        # Skip classes with missing required fields
+                        if not cls_name or not cls_name.strip():
+                            logger.debug(f"Skipping class {cls_uid} with empty name")
+                            continue
+                        
                         if cls_uid and cls_uid not in node_ids:
                             elements.append({
                                 "data": {
@@ -267,6 +298,12 @@ def get_graph():
                                 if not method:
                                     continue
                                 method_uid = method.get("id")
+                                method_name = method.get("name", "")
+                                
+                                # Skip methods with missing required fields
+                                if not method_name or not method_name.strip():
+                                    logger.debug(f"Skipping method {method_uid} with empty name")
+                                    continue
                                 
                                 if method_uid and method_uid not in node_ids:
                                     # Add method node
@@ -303,6 +340,12 @@ def get_graph():
                                 if not base:
                                     continue
                                 base_uid = base.get("id")
+                                base_name = base.get("name", "")
+                                
+                                # Skip base classes with missing required fields
+                                if not base_name or not base_name.strip():
+                                    logger.debug(f"Skipping base class {base_uid} with empty name")
+                                    continue
                                 
                                 if base_uid and base_uid not in node_ids:
                                     # Add base class node
