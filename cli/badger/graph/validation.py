@@ -20,6 +20,7 @@ class FileNode:
     # Optional fields
     functions_count: int = 0
     classes_count: int = 0
+    structs_count: int = 0
     imports_count: int = 0
     macros_count: int = 0
     variables_count: int = 0
@@ -43,6 +44,7 @@ class FileNode:
             "File.path": self.path,
             "File.functionsCount": self.functions_count,
             "File.classesCount": self.classes_count,
+            "File.structsCount": self.structs_count,
             "File.importsCount": self.imports_count,
             "File.macrosCount": self.macros_count,
             "File.variablesCount": self.variables_count,
@@ -157,6 +159,53 @@ class ClassNode:
             node["Class.baseClasses"] = self.base_classes
         if self.embedding is not None:
             node["Class.embedding"] = self.embedding
+        
+        return node
+
+
+@dataclass
+class StructNode:
+    """Struct node with required fields enforced.
+    
+    Represents C structs/unions/enums.
+    """
+    name: str  # Required: String!
+    file: str  # Required: String!
+    
+    # Optional fields
+    line: int = 0
+    column: int = 0
+    fields: Optional[List[str]] = None  # Field names (not methods)
+    embedding: Optional[List[float]] = None
+    
+    def validate(self) -> tuple[bool, Optional[str]]:
+        """Validate required fields."""
+        if not isinstance(self.name, str):
+            return False, f"Struct.name must be a string, got {type(self.name).__name__}"
+        if not self.name or not self.name.strip():
+            return False, "Struct.name is required (String!) and cannot be empty"
+        if not isinstance(self.file, str):
+            return False, f"Struct.file must be a string, got {type(self.file).__name__}"
+        if not self.file or not self.file.strip():
+            return False, "Struct.file is required (String!) and cannot be empty"
+        return True, None
+    
+    def to_dgraph_dict(self, uid: str) -> Dict[str, Any]:
+        """Convert to Dgraph node dictionary."""
+        node = {
+            "uid": f"_:{uid}",
+            "dgraph.type": "Struct",
+            "Struct.name": self.name,
+            "Struct.file": self.file,
+            "Struct.line": self.line,
+            "Struct.column": self.column,
+        }
+        
+        # Add optional fields
+        if self.fields is not None:
+            node["Struct.fields"] = self.fields
+        if self.embedding is not None:
+            node["Struct.embedding"] = self.embedding
         
         return node
 
@@ -409,6 +458,7 @@ def create_file_node(data: Dict[str, Any]) -> Optional[FileNode]:
             path=path,
             functions_count=data.get("functions_count", 0),
             classes_count=data.get("classes_count", 0),
+            structs_count=data.get("structs_count", 0),
             imports_count=data.get("imports_count", 0),
             macros_count=data.get("macros_count", 0),
             variables_count=data.get("variables_count", 0),
@@ -492,6 +542,38 @@ def create_class_node(data: Dict[str, Any]) -> Optional[ClassNode]:
         return node
     except Exception as e:
         logger.error(f"Error creating ClassNode: {e}")
+        return None
+
+
+def create_struct_node(data: Dict[str, Any]) -> Optional[StructNode]:
+    """Create and validate a StructNode from dictionary data."""
+    try:
+        # Strict validation: ensure required fields exist and are strings
+        name = data.get("name")
+        file = data.get("file")
+        
+        if name is None or not isinstance(name, str):
+            logger.warning(f"Invalid StructNode: name is missing or not a string - skipping")
+            return None
+        if file is None or not isinstance(file, str):
+            logger.warning(f"Invalid StructNode: file is missing or not a string - skipping")
+            return None
+        
+        node = StructNode(
+            name=name,
+            file=file,
+            line=data.get("line", 0),
+            column=data.get("column", 0),
+            fields=data.get("fields"),
+            embedding=data.get("embedding"),
+        )
+        is_valid, error = node.validate()
+        if not is_valid:
+            logger.warning(f"Invalid StructNode: {error} - skipping")
+            return None
+        return node
+    except Exception as e:
+        logger.error(f"Error creating StructNode: {e}")
         return None
 
 

@@ -149,6 +149,7 @@ def index_directory(
         "totalFiles": len(parse_results),
         "totalFunctions": len(graph_data.functions),
         "totalClasses": len(graph_data.classes),
+        "totalStructs": len(graph_data.structs) if hasattr(graph_data, 'structs') else 0,
         "totalImports": len(graph_data.imports),
         "files": graph_data.files
     }
@@ -634,6 +635,8 @@ def index(
     table.add_row("Files indexed", str(len(parse_results)))
     table.add_row("Functions found", str(len(graph_data.functions)))
     table.add_row("Classes found", str(len(graph_data.classes)))
+    if hasattr(graph_data, 'structs') and graph_data.structs:
+        table.add_row("Structs found", str(len(graph_data.structs)))
     table.add_row("Imports found", str(len(graph_data.imports)))
     if hasattr(graph_data, 'macros') and graph_data.macros:
         table.add_row("Macros found", str(len(graph_data.macros)))

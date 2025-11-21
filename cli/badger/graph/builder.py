@@ -1,5 +1,7 @@
 """Build graph from parsed results."""
 
+import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Dict, Any
@@ -14,6 +16,7 @@ class GraphData:
     files: List[Dict[str, Any]] = field(default_factory=list)
     functions: List[Dict[str, Any]] = field(default_factory=list)
     classes: List[Dict[str, Any]] = field(default_factory=list)
+    structs: List[Dict[str, Any]] = field(default_factory=list)
     imports: List[Dict[str, Any]] = field(default_factory=list)
     macros: List[Dict[str, Any]] = field(default_factory=list)
     variables: List[Dict[str, Any]] = field(default_factory=list)
@@ -40,6 +43,7 @@ def build_graph(parse_results: List[ParseResult]) -> GraphData:
             "path": result.file_path,
             "functions_count": len(result.functions),
             "classes_count": len(result.classes),
+            "structs_count": len(result.structs),
             "imports_count": len(result.imports),
             "macros_count": len(result.macros),
             "variables_count": len(result.variables),
@@ -66,6 +70,23 @@ def build_graph(parse_results: List[ParseResult]) -> GraphData:
             if cls.base_classes:
                 cls_dict["base_classes"] = cls.base_classes
             graph.classes.append(cls_dict)
+        
+        # Add structs (C structs/unions/enums)
+        for struct in result.structs:
+            struct_dict = {
+                "name": struct.name,
+                "file": struct.file_path,
+                "line": struct.start.row + 1,
+                "column": struct.start.column,
+                "start_row": struct.start.row,
+                "start_column": struct.start.column,
+                "end_row": struct.end.row,
+                "end_column": struct.end.column,
+            }
+            # Add fields if present
+            if struct.fields:
+                struct_dict["fields"] = struct.fields
+            graph.structs.append(struct_dict)
         
         # Add functions and determine which are methods
         for func in result.functions:
@@ -128,9 +149,19 @@ def build_graph(parse_results: List[ParseResult]) -> GraphData:
                 "end_row": imp.end.row,
                 "end_column": imp.end.column,
             }
-            # Add enhanced fields if present
+            # Module is required by schema - ensure it's always set
             if imp.module:
                 imp_dict["module"] = imp.module
+            else:
+                # Fallback: try to extract from text (shouldn't happen if parser is working correctly)
+                match = re.search(r'#include\s+["<]([^">]+)[">]', imp.text)
+                if match:
+                    imp_dict["module"] = match.group(1)
+                else:
+                    # Last resort: use text itself
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Import in {imp.file_path}:{imp.start.row+1} has no module and couldn't extract from text: {imp.text}")
+                    imp_dict["module"] = imp.text.strip()
             if imp.imported_items:
                 imp_dict["imported_items"] = imp.imported_items
             if imp.alias:
@@ -257,27 +288,27 @@ def build_graph(parse_results: List[ParseResult]) -> GraphData:
                 "line": tdef.start.row + 1,
             })
     
-    # Build a map of struct names to Class nodes for struct field access resolution
-    struct_name_to_class = {}
+    # Build a map of struct names to Struct nodes for struct field access resolution
+    struct_name_to_struct = {}
     for result in parse_results:
-        for cls in result.classes:
-            struct_name_to_class[(cls.name, result.file_path)] = cls
+        for struct in result.structs:
+            struct_name_to_struct[(struct.name, result.file_path)] = struct
     
-    # Resolve struct field accesses to Class nodes
+    # Resolve struct field accesses to Struct nodes
     for result in parse_results:
         for sfa in result.struct_field_accesses:
-            # Try to find matching struct (Class)
+            # Try to find matching struct
             resolved_struct = None
             
             # First try exact match by name and file
             key = (sfa.struct_name, result.file_path)
-            if key in struct_name_to_class:
-                resolved_struct = struct_name_to_class[key]
+            if key in struct_name_to_struct:
+                resolved_struct = struct_name_to_struct[key]
             else:
                 # Try to find by name only (might be in different file)
-                for (name, file_path), cls in struct_name_to_class.items():
+                for (name, file_path), struct in struct_name_to_struct.items():
                     if name == sfa.struct_name:
-                        resolved_struct = cls
+                        resolved_struct = struct
                         break
                 
                 # If still not found, check typedef aliases
@@ -291,9 +322,9 @@ def build_graph(parse_results: List[ParseResult]) -> GraphData:
                                 parts = tdef.underlying_type.split()
                                 if len(parts) > 1:
                                     struct_name = parts[-1]
-                                    for (name, file_path), cls in struct_name_to_class.items():
+                                    for (name, file_path), struct in struct_name_to_struct.items():
                                         if name == struct_name:
-                                            resolved_struct = cls
+                                            resolved_struct = struct
                                             break
                             if resolved_struct:
                                 break

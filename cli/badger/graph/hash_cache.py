@@ -109,6 +109,7 @@ def calculate_node_hash(node_type: str, node_data: Dict[str, Any]) -> str:
             "path": node_data.get("path", ""),
             "functions_count": node_data.get("functions_count", 0),
             "classes_count": node_data.get("classes_count", 0),
+            "structs_count": node_data.get("structs_count", 0),
             "imports_count": node_data.get("imports_count", 0),
             "macros_count": node_data.get("macros_count", 0),
             "variables_count": node_data.get("variables_count", 0),
@@ -128,6 +129,18 @@ def calculate_node_hash(node_type: str, node_data: Dict[str, Any]) -> str:
             "docstring": node_data.get("docstring", ""),
         })
     elif node_type == "Class":
+        # Class node hash
+        name = node.get("Class.name", "")
+        file = node.get("Class.file", "")
+        methods = tuple(sorted(node.get("Class.methods", [])))
+        base_classes = tuple(sorted(node.get("Class.baseClasses", [])))
+        return f"{name}@{file}@{methods}@{base_classes}"
+    elif node_type == "Struct":
+        # Struct node hash
+        name = node.get("Struct.name", "")
+        file = node.get("Struct.file", "")
+        fields = tuple(sorted(node.get("Struct.fields", [])))
+        return f"{name}@{file}@{fields}"
         hash_data.update({
             "name": node_data.get("name", ""),
             "file": node_data.get("file", ""),

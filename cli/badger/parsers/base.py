@@ -38,6 +38,16 @@ class Class:
 
 
 @dataclass
+class Struct:
+    """Struct/union/enum definition (C)."""
+    name: str
+    start: Position
+    end: Position
+    file_path: str
+    fields: List[str] = field(default_factory=list)
+
+
+@dataclass
 class Import:
     """Import statement."""
     text: str
@@ -142,6 +152,7 @@ class ParseResult:
     classes: List[Class]
     imports: List[Import]
     total_nodes: int
+    structs: List[Struct] = field(default_factory=list)
     tree_string: Optional[str] = None
     function_calls: List[FunctionCall] = field(default_factory=list)
     typedefs: List[Typedef] = field(default_factory=list)
@@ -180,6 +191,13 @@ class BaseParser(ABC):
     def extract_classes(self, node) -> List[Class]:
         """Extract class definitions from AST node."""
         pass
+    
+    def extract_structs(self, node) -> List[Struct]:
+        """Extract struct/union/enum definitions from AST node.
+        
+        Default implementation returns empty list. Override in C parser.
+        """
+        return []
     
     @abstractmethod
     def extract_imports(self, node) -> List[Import]:

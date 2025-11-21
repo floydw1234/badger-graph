@@ -1,5 +1,6 @@
 """MCP tool implementations for querying code graph database."""
 
+import json
 import logging
 import fnmatch
 from pathlib import Path
@@ -57,6 +58,26 @@ def _file_path_to_module(file_path: str, workspace_root: str = None) -> str:
             module_parts.append(part)
     
     return ".".join(module_parts) if module_parts else path.stem
+
+
+def extract_relative_path(path: str) -> str:
+    """Extract relative path component from absolute path.
+    
+    Args:
+        path: Absolute file path
+    
+    Returns:
+        Relative path component (e.g., "packages/encryption/encryption.h")
+    """
+    parts = path.split("/")
+    if "packages" in parts:
+        idx = parts.index("packages")
+        return "/".join(parts[idx:])
+    elif "src" in parts:
+        idx = parts.index("src")
+        return "/".join(parts[idx+1:])
+    # Fallback: return just the filename
+    return parts[-1]
 
 
 def _find_files_importing_module(
@@ -308,15 +329,15 @@ async def find_symbol_usages(
                         })
         
         elif symbol_type == "struct":
-            # Query Class nodes by name (structs are stored as Classes)
+            # Query Struct nodes by name
             query = """
             query($structName: String!) {
-                struct: queryClass(filter: {name: {eq: $structName}}, first: 100) {
+                struct: queryStruct(filter: {name: {eq: $structName}}, first: 100) {
                     id
                     name
                     file
                     line
-                    methods
+                    fields
                     accessedByFieldAccess {
                         id
                         file
@@ -464,78 +485,201 @@ async def get_include_dependencies(
             dependencies = await find_importers(module_name, set())
         
         else:
-            # C/C++: find files that include this header
-            async def find_includers(target_path: str, visited: Set[str], depth: int = 0) -> List[Dict[str, Any]]:
-                """Find files that include the target file, recursively."""
-                if target_path in visited or depth > 20:
+            # C/C++: find files that include this header using native DQL
+            # Extract relative path for matching
+            target_modules = set()
+            
+            if file_path.endswith(".c"):
+                h_path = file_path[:-2] + ".h"
+                rel_path = extract_relative_path(h_path)
+                target_modules.add(rel_path)
+                target_modules.add(h_path.split("/")[-1])
+                # Also try the .c path
+                target_modules.add(extract_relative_path(file_path))
+            else:
+                rel_path = extract_relative_path(file_path)
+                target_modules.add(rel_path)
+                target_modules.add(file_path.split("/")[-1])
+            
+            logger.debug(f"get_include_dependencies: Searching for modules matching: {target_modules}")
+            
+            def find_includers_dql(target_modules_set: Set[str], visited: Set[str], depth: int = 0) -> List[Dict[str, Any]]:
+                """Find files that include any of the target modules using native DQL."""
+                if depth > 20:
                     return []
                 
-                visited.add(target_path)
                 dependencies = []
                 
-                # Get the target file's imports
-                query = """
-                query($filePath: String!) {
-                    file: queryFile(filter: {path: {eq: $filePath}}, first: 1) {
-                        id
-                        containsImport {
-                            module
+                # Step 1: Get all files with their Import UIDs
+                files_query = """
+                {
+                    files(func: type(File)) {
+                        uid
+                        File.path
+                        File.containsImport {
+                            uid
                         }
                     }
                 }
                 """
-                result = dgraph_client.execute_graphql_query(query, {"filePath": target_path})
                 
-                if not result.get("file"):
-                    return []
+                txn = dgraph_client.client.txn(read_only=True)
+                try:
+                    result = txn.query(files_query)
+                    data = json.loads(result.json)
+                finally:
+                    txn.discard()
                 
-                file_node = result["file"][0] if isinstance(result["file"], list) else result["file"]
-                imports = file_node.get("containsImport", [])
-                if not isinstance(imports, list):
-                    imports = [imports] if imports else []
+                files = data.get("files", [])
                 
-                # For each import, find files that include it
-                modules = [imp.get("module") for imp in imports if imp and imp.get("module")]
+                # Step 2: Collect all Import UIDs and create a mapping
+                import_uids = set()
+                file_to_import_uids = {}
+                
+                for file_node in files:
+                    file_path_check = file_node.get("File.path", "")
+                    if not file_path_check:
+                        continue
                     
-                # Query all files and filter (Dgraph doesn't support nested filters)
-                all_files_query = """
-                query {
-                        files: queryFile(first: 10000) {
-                            path
-                        containsImport {
-                                module
-                            }
+                    imports_list = file_node.get("File.containsImport", [])
+                    if not isinstance(imports_list, list):
+                        imports_list = [imports_list] if imports_list else []
+                    
+                    file_import_uids = []
+                    for imp in imports_list:
+                        if isinstance(imp, dict):
+                            imp_uid = imp.get("uid")
+                            if imp_uid:
+                                import_uids.add(imp_uid)
+                                file_import_uids.append(imp_uid)
+                    
+                    if file_import_uids:
+                        file_to_import_uids[file_path_check] = file_import_uids
+                
+                # Step 3: Query Import nodes directly by module instead of by UID
+                # This avoids issues with expand(_all_) when querying by UID from relationships
+                uid_to_import = {}
+                
+                # Query imports that match our target modules
+                for target_module in target_modules_set:
+                    escaped_module = target_module.replace('"', '\\"')
+                    import_query = f"""
+                    {{
+                        imports(func: eq(Import.module, "{escaped_module}")) {{
+                            uid
+                            Import.module
+                            Import.text
+                            Import.file
+                        }}
+                    }}
+                    """
+                    
+                    txn2 = dgraph_client.client.txn(read_only=True)
+                    try:
+                        result2 = txn2.query(import_query)
+                        data2 = json.loads(result2.json)
+                    finally:
+                        txn2.discard()
+                    
+                    imports = data2.get("imports", [])
+                    for imp in imports:
+                        if isinstance(imp, dict):
+                            uid = imp.get("uid")
+                            if uid:
+                                uid_to_import[uid] = imp
+                
+                # Also query by filename for cases where module is just "encryption.h"
+                target_filenames = {t.split("/")[-1] for t in target_modules_set if "/" in t}
+                for target_filename in target_filenames:
+                    # Query all imports and filter by filename
+                    all_imports_query = """
+                    {
+                        imports(func: has(Import.module)) {
+                            uid
+                            Import.module
+                            Import.text
+                            Import.file
                         }
                     }
                     """
-                all_files_result = dgraph_client.execute_graphql_query(all_files_query, {})
                     
-                if "files" in all_files_result:
-                    for importer_file in all_files_result["files"] or []:
-                        importer_path = importer_file.get("path", "")
-                        if importer_path == target_path or importer_path in visited:
+                    txn3 = dgraph_client.client.txn(read_only=True)
+                    try:
+                        result3 = txn3.query(all_imports_query)
+                        data3 = json.loads(result3.json)
+                    finally:
+                        txn3.discard()
+                    
+                    imports3 = data3.get("imports", [])
+                    for imp in imports3:
+                        if not isinstance(imp, dict):
                             continue
+                        module = imp.get("Import.module", "")
+                        if not module or module.split("/")[-1] != target_filename:
+                            continue
+                        # Skip if already matched by exact query
+                        if module in target_modules_set:
+                            continue
+                        uid = imp.get("uid")
+                        if uid:
+                            uid_to_import[uid] = imp
+                
+                # Step 4: Match Import nodes to target modules and get their files
+                # Since we queried by module, all imports in uid_to_import already match
+                for imp_uid, imp in uid_to_import.items():
+                    module = imp.get("Import.module", "")
+                    if not module:
+                        continue
+                    
+                    # Get the file that contains this import
+                    file_path_check = imp.get("Import.file", "")
+                    if not file_path_check or file_path_check in visited:
+                        continue
+                    
+                    # Check if module matches any target (it should, since we queried by target)
+                    matches = False
+                    matched_target = None
+                    
+                    # Exact match
+                    if module in target_modules_set:
+                        matches = True
+                        matched_target = module
+                    else:
+                        # Try matching by filename
+                        module_filename = module.split("/")[-1]
+                        for target in target_modules_set:
+                            target_filename = target.split("/")[-1]
+                            if module_filename == target_filename:
+                                # If target is just a filename, match any path with that filename
+                                if "/" not in target:
+                                    matches = True
+                                    matched_target = module
+                                    break
+                                # If both have paths, check if they end the same way
+                                if module.endswith("/" + target) or target.endswith("/" + module):
+                                    matches = True
+                                    matched_target = module
+                                    break
+                    
+                    if matches:
+                        visited.add(file_path_check)
+                        dependencies.append({
+                            "file": file_path_check,
+                            "module": matched_target or module,
+                            "depth": depth + 1,
+                            "reason": f"Includes {matched_target or module}"
+                        })
                         
-                        importer_imports = importer_file.get("containsImport", [])
-                        if not isinstance(importer_imports, list):
-                            importer_imports = [importer_imports] if importer_imports else []
-                        
-                        # Check if this file imports any of the modules
-                        for imp in importer_imports:
-                            if imp and imp.get("module") in modules:
-                                dependencies.append({
-                                        "file": importer_path,
-                                    "module": imp.get("module"),
-                                        "depth": depth + 1,
-                                    "reason": f"Includes {imp.get('module')}"
-                                })
-                                # Recursively find includers of this file
-                                dependencies.extend(await find_includers(importer_path, visited, depth + 1))
-                                break
+                        # Recursively find includers of this file
+                        new_target_modules = {extract_relative_path(file_path_check)}
+                        if file_path_check.endswith(".c"):
+                            h_path = file_path_check[:-2] + ".h"
+                            new_target_modules.add(extract_relative_path(h_path))
+                        dependencies.extend(find_includers_dql(new_target_modules, visited, depth + 1))
                 
                 return dependencies
             
-            dependencies = await find_includers(file_path, set())
+            dependencies = find_includers_dql(target_modules, set())
         
         # Remove duplicates while preserving order
         seen = set()
@@ -847,27 +991,48 @@ async def check_affected_files(
         }
         
         for changed_file in changed_files:
-            # Simple query: find the file
-            query = """
-                query($filePath: String!) {
-                    file: queryFile(filter: {path: {eq: $filePath}}, first: 1) {
-                        id
-                        path
-                        containsFunction {
-                            name
-                        }
-                    }
-                }
-                """
-            result = dgraph_client.execute_graphql_query(query, {"filePath": changed_file})
-                
-            if not result.get("file"):
+            # Use DQL to find the file and its functions (avoiding GraphQL issues)
+            escaped_path = changed_file.replace('"', '\\"')
+            file_query = f"""
+            {{
+                files(func: eq(File.path, "{escaped_path}"), first: 1) {{
+                    uid
+                    File.path
+                    File.containsFunction {{
+                        uid
+                        Function.name
+                    }}
+                }}
+            }}
+            """
+            
+            txn = dgraph_client.client.txn(read_only=True)
+            try:
+                result = txn.query(file_query)
+                data = json.loads(result.json)
+            finally:
+                txn.discard()
+            
+            files = data.get("files", [])
+            if not files:
+                # File not found, but still try to check dependencies
+                file_path = changed_file
+                deps_result = await get_include_dependencies(dgraph_client, file_path)
+                for dep in deps_result.get("dependencies", []):
+                    dep_file = dep.get("file", "")
+                    if dep_file and dep_file != file_path:
+                        affected_files.add(dep_file)
+                        by_type["direct_include"].append({
+                            "file": dep_file,
+                            "reason": dep.get("reason", "Imports/includes file"),
+                            "changed_file": changed_file
+                        })
                 continue
             
-            file_node = result["file"][0] if isinstance(result["file"], list) else result["file"]
-            file_path = file_node.get("path", changed_file)
+            file_node = files[0]
+            file_path = file_node.get("File.path", changed_file)
             
-            # Find files that import/include this file (using simplified get_include_dependencies)
+            # Find files that import/include this file (using get_include_dependencies)
             deps_result = await get_include_dependencies(dgraph_client, file_path)
             for dep in deps_result.get("dependencies", []):
                 dep_file = dep.get("file", "")
@@ -880,9 +1045,34 @@ async def check_affected_files(
                     })
             
             # Find functions in changed file and their callers
-            functions = file_node.get("containsFunction", [])
-            if not isinstance(functions, list):
-                functions = [functions] if functions else []
+            functions_list = file_node.get("File.containsFunction", [])
+            if not isinstance(functions_list, list):
+                functions_list = [functions_list] if functions_list else []
+            
+            # Get function names from UIDs
+            function_uids = [f.get("uid") for f in functions_list if isinstance(f, dict) and f.get("uid")]
+            functions = []
+            if function_uids:
+                # Query functions by UID to get their names
+                func_uid_list = ", ".join(function_uids)
+                func_query = f"""
+                {{
+                    functions(func: uid({func_uid_list})) {{
+                        uid
+                        Function.name
+                    }}
+                }}
+                """
+                
+                txn2 = dgraph_client.client.txn(read_only=True)
+                try:
+                    result2 = txn2.query(func_query)
+                    data2 = json.loads(result2.json)
+                finally:
+                    txn2.discard()
+                
+                functions_data = data2.get("functions", [])
+                functions = [{"name": f.get("Function.name", "")} for f in functions_data if isinstance(f, dict)]
             
             for func in functions:
                 func_name = func.get("name", "")

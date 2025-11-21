@@ -3,6 +3,7 @@ type File {
     path: String! @id @search(by: [exact, term])
     functionsCount: Int
     classesCount: Int
+    structsCount: Int
     importsCount: Int
     macrosCount: Int
     variablesCount: Int
@@ -11,6 +12,7 @@ type File {
     astNodes: Int
     containsFunction: [Function] @hasInverse(field: containedInFile)
     containsClass: [Class] @hasInverse(field: containedInFile)
+    containsStruct: [Struct] @hasInverse(field: containedInFile)
     containsImport: [Import] @hasInverse(field: containedInFile)
     containsMacro: [Macro] @hasInverse(field: containedInFile)
     containsVariable: [Variable] @hasInverse(field: containedInFile)
@@ -51,6 +53,17 @@ type Class {
     containsMethod: [Function]
     inheritsClass: [Class] @hasInverse(field: inheritedByClass)
     inheritedByClass: [Class]
+}
+
+type Struct {
+    id: ID!
+    name: String! @search(by: [exact, term])
+    file: String! @search(by: [exact])
+    line: Int
+    column: Int
+    fields: [String!]
+    embedding: [Float!] @embedding @search(by: [hnsw])
+    containedInFile: File
     accessedByFieldAccess: [StructFieldAccess] @hasInverse(field: accessesStruct)
 }
 
@@ -110,6 +123,6 @@ type StructFieldAccess {
     column: Int
     accessType: String
     containedInFile: File
-    accessesStruct: Class @hasInverse(field: accessedByFieldAccess)
+    accessesStruct: Struct @hasInverse(field: accessedByFieldAccess)
 }
 

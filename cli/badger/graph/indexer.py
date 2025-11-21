@@ -107,6 +107,8 @@ def index_workspace(
                 logger.info(f"Successfully indexed {len(parse_results)} files")
                 logger.info(f"  - {len(graph_data.functions)} functions")
                 logger.info(f"  - {len(graph_data.classes)} classes")
+                if hasattr(graph_data, 'structs') and graph_data.structs:
+                    logger.info(f"  - {len(graph_data.structs)} structs")
                 logger.info(f"  - {len(graph_data.imports)} imports")
                 if hasattr(graph_data, 'macros') and graph_data.macros:
                     logger.info(f"  - {len(graph_data.macros)} macros")

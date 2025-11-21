@@ -104,6 +104,14 @@ def get_graph():
                         file
                     }
                 }
+                containsStruct {
+                    id
+                    name
+                    file
+                    line
+                    column
+                    fields
+                }
                 containsImport {
                     id
                     module
@@ -165,6 +173,7 @@ def get_graph():
                             "path": file_path,
                             "functions_count": file_node.get("functionsCount", 0),
                             "classes_count": file_node.get("classesCount", 0),
+                            "structs_count": file_node.get("structsCount", 0),
                         }
                     })
                     node_ids.add(file_uid)
@@ -250,6 +259,47 @@ def get_graph():
                                             }
                                         })
                                         node_ids.add(edge_id)
+                
+                # Process structs in file
+                if "containsStruct" in file_node:
+                    for struct in file_node["containsStruct"]:
+                        if not struct:
+                            continue
+                        struct_uid = struct.get("id")
+                        struct_name = struct.get("name", "")
+                        
+                        # Skip structs with missing required fields
+                        if not struct_name or not struct_name.strip():
+                            logger.debug(f"Skipping struct {struct_uid} with empty name")
+                            continue
+                        
+                        if struct_uid and struct_uid not in node_ids:
+                            elements.append({
+                                "data": {
+                                    "id": struct_uid,
+                                    "label": struct_name or "Struct",
+                                    "type": "struct",
+                                    "name": struct_name,
+                                    "file": struct.get("file", ""),
+                                    "line": struct.get("line", 0),
+                                    "fields": struct.get("fields", []),
+                                }
+                            })
+                            node_ids.add(struct_uid)
+                        
+                        # Add edge from file to struct
+                        if file_uid and struct_uid:
+                            edge_id = f"{file_uid}-{struct_uid}"
+                            if edge_id not in node_ids:
+                                elements.append({
+                                    "data": {
+                                        "id": edge_id,
+                                        "source": file_uid,
+                                        "target": struct_uid,
+                                        "type": "contains"
+                                    }
+                                })
+                                node_ids.add(edge_id)
                 
                 # Process classes in file
                 if "containsClass" in file_node:
@@ -427,6 +477,17 @@ def search_nodes():
                     path
                 }
             }
+            structs: queryStruct(filter: {name: {alloftext: $queryText}}) {
+                id
+                name
+                file
+                line
+                fields
+                containedInFile {
+                    id
+                    path
+                }
+            }
         }
         """
         
@@ -520,6 +581,57 @@ def search_nodes():
                                         }
                                     })
                                     node_ids.add(edge_id)
+        
+        # Add matching structs
+        if "structs" in result:
+            for struct in result["structs"]:
+                struct_uid = struct.get("id")
+                if struct_uid and struct_uid not in node_ids:
+                    elements.append({
+                        "data": {
+                            "id": struct_uid,
+                            "label": struct.get("name", ""),
+                            "type": "struct",
+                            "name": struct.get("name", ""),
+                            "file": struct.get("file", ""),
+                            "line": struct.get("line", 0),
+                            "fields": struct.get("fields", []),
+                        }
+                    })
+                    node_ids.add(struct_uid)
+                
+                # Add relationships for this struct
+                # Add file relationship
+                if "containedInFile" in struct and struct["containedInFile"]:
+                    file_rel = struct["containedInFile"][0] if isinstance(struct["containedInFile"], list) else struct["containedInFile"]
+                    file_uid = file_rel.get("id")
+                    file_path = file_rel.get("path", "")
+                    
+                    if file_uid:
+                        # Add file node if not exists
+                        if file_uid not in node_ids:
+                            elements.append({
+                                "data": {
+                                    "id": file_uid,
+                                    "label": Path(file_path).name if file_path else "File",
+                                    "type": "file",
+                                    "path": file_path,
+                                }
+                            })
+                            node_ids.add(file_uid)
+                        
+                        # Add edge
+                        edge_id = f"{file_uid}-{struct_uid}"
+                        if edge_id not in node_ids:
+                            elements.append({
+                                "data": {
+                                    "id": edge_id,
+                                    "source": file_uid,
+                                    "target": struct_uid,
+                                    "type": "contains"
+                                }
+                            })
+                            node_ids.add(edge_id)
         
         # Add matching classes
         if "classes" in result:

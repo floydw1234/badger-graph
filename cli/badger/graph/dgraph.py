@@ -15,7 +15,7 @@ import requests
 
 from .builder import GraphData
 from .validation import (
-    create_file_node, create_function_node, create_class_node,
+    create_file_node, create_function_node, create_class_node, create_struct_node,
     create_import_node, create_macro_node, create_variable_node,
     create_typedef_node, create_struct_field_access_node
 )
@@ -247,13 +247,14 @@ class DgraphClient:
             logger.error(f"Traceback: {traceback.format_exc()}")
             return {}
     
-    def insert_graph(self, graph_data: GraphData, strict_validation: bool = True) -> bool:
+    def insert_graph(self, graph_data: GraphData, strict_validation: bool = True, hash_cache = None) -> bool:
         """Insert graph data into Dgraph.
         
         Args:
             graph_data: Graph data to insert
             strict_validation: If True, raise exceptions on validation failures.
                              If False (default), skip invalid nodes with warnings.
+            hash_cache: Optional HashCache instance for incremental indexing.
         
         Returns:
             True if successful, False otherwise
@@ -421,6 +422,66 @@ class DgraphClient:
             nodes.append(node)
             cache_stats["inserted"] += 1
             
+        # Create Struct nodes
+        struct_uids: Dict[tuple[str, str], str] = {}
+        for struct_data in graph_data.structs:
+            struct_node = create_struct_node(struct_data)
+            if not struct_node:
+                validation_failures.append(("Struct", struct_data.get("name", "unknown"), struct_data.get("file", "unknown")))
+                if strict_validation:
+                    raise ValueError(f"Invalid Struct node: {struct_data.get('name', 'unknown')} in {struct_data.get('file', 'unknown')}")
+                continue
+            
+            struct_name = struct_node.name
+            struct_file = struct_node.file
+            struct_line = struct_node.line
+            struct_uid = self._generate_uid(f"{struct_name}@{struct_file}@{struct_line}")
+            struct_uids[(struct_name, struct_file)] = struct_uid
+            
+            # Generate embedding for struct
+            try:
+                embedding_service = self._get_embedding_service()
+                logger.info(f"Generating embedding for struct '{struct_name}' with fields={struct_node.fields}")
+                embedding = embedding_service.generate_struct_embedding(
+                    name=struct_name,
+                    fields=struct_node.fields
+                )
+                if embedding is not None and len(embedding) > 0:
+                    # For float32vector type, convert numpy array to list of Python floats
+                    # Dgraph expects a plain Python list for float32vector type
+                    try:
+                        if isinstance(embedding, np.ndarray):
+                            # Convert to float32 numpy array first, then to plain Python list
+                            embedding_f32 = embedding.astype(np.float32)
+                            # Convert to list and ensure all are Python floats (not numpy scalars)
+                            embedding_list = [float(x) for x in embedding_f32.tolist()]
+                        elif isinstance(embedding, list):
+                            # Ensure all values are Python floats (not numpy types)
+                            embedding_list = [float(x) for x in embedding]
+                        else:
+                            embedding_list = [float(x) for x in list(embedding)]
+                        
+                        # Validate embedding: must be correct dimension and contain valid floats
+                        if len(embedding_list) == EmbeddingService.EMBEDDING_DIMENSION and all(
+                            isinstance(x, float) and not (np.isnan(x) or np.isinf(x)) 
+                            for x in embedding_list
+                        ):
+                            struct_node.embedding = embedding_list
+                            logger.info(f"Successfully generated embedding for struct '{struct_name}' (dimension: {len(embedding_list)})")
+                        else:
+                            logger.warning(f"Invalid embedding for struct '{struct_name}': dimension={len(embedding_list)}, expected={EmbeddingService.EMBEDDING_DIMENSION}, contains_nan={any(np.isnan(x) for x in embedding_list) if len(embedding_list) > 0 else False}")
+                    except Exception as e:
+                        logger.warning(f"Error processing embedding for struct '{struct_name}': {e}")
+                else:
+                    logger.warning(f"Generated empty or None embedding for struct '{struct_name}'")
+            except Exception as e:
+                logger.warning(f"Failed to generate embedding for struct '{struct_name}': {e}", exc_info=True)
+                # Continue without embedding rather than failing the entire insertion
+            
+            node = struct_node.to_dgraph_dict(struct_uid)
+            nodes.append(node)
+            cache_stats["inserted"] += 1
+        
         # Create Import nodes
         for imp_data in graph_data.imports:
             imp_node = create_import_node(imp_data)
@@ -521,6 +582,7 @@ class DgraphClient:
         # This prevents creating relationships to nodes that don't exist in the current mutation
         inserted_function_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Function"}
         inserted_class_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Class"}
+        inserted_struct_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Struct"}
         inserted_import_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Import"}
         inserted_macro_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Macro"}
         inserted_variable_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Variable"}
@@ -905,16 +967,18 @@ class DgraphClient:
                         node["StructFieldAccess.containedInFile"] = {"uid": f"_:{file_uid}"}
                         break
                 
-                # Link to Class (struct) if resolved
+                # Link to Struct if resolved
                 if "resolved_struct_name" in sfa_data and "resolved_struct_file" in sfa_data:
                     resolved_name = sfa_data["resolved_struct_name"]
                     resolved_file = sfa_data["resolved_struct_file"]
-                    if (resolved_name, resolved_file) in class_uids:
-                        struct_uid = class_uids[(resolved_name, resolved_file)]
-                        for node in nodes:
-                            if node.get("uid") == f"_:{sfa_uid}":
-                                node["StructFieldAccess.accessesStruct"] = {"uid": f"_:{struct_uid}"}
-                                break
+                    if (resolved_name, resolved_file) in struct_uids:
+                        struct_uid = struct_uids[(resolved_name, resolved_file)]
+                        # Only add relationship if the struct node is actually being inserted
+                        if struct_uid in inserted_struct_uids:
+                            for node in nodes:
+                                if node.get("uid") == f"_:{sfa_uid}":
+                                    node["StructFieldAccess.accessesStruct"] = {"uid": f"_:{struct_uid}"}
+                                    break
         
         # Keep blank nodes as-is - Dgraph will resolve them within the transaction
         # For files, use upsert to ensure we update existing nodes instead of creating duplicates
@@ -962,6 +1026,23 @@ class DgraphClient:
                 else:
                     logger.warning(f"Removing invalid Class.embedding from node {node.get('Class.name', 'unknown')}: not a list or wrong dimension")
                     del node["Class.embedding"]
+            if "Struct.embedding" in node:
+                emb = node["Struct.embedding"]
+                if isinstance(emb, list) and len(emb) == EmbeddingService.EMBEDDING_DIMENSION:
+                    # Ensure all values are native Python floats (not numpy types)
+                    # Create a fresh Python list to ensure proper serialization
+                    try:
+                        embedding_list = list([float(x) for x in emb])
+                        node["Struct.embedding"] = embedding_list
+                        # Debug: log first few values to verify format
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(f"Struct embedding format check: type={type(embedding_list)}, first_3={embedding_list[:3] if len(embedding_list) >= 3 else embedding_list}")
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Removing invalid Struct.embedding from node {node.get('Struct.name', 'unknown')}: {e}")
+                        del node["Struct.embedding"]
+                else:
+                    logger.warning(f"Removing invalid Struct.embedding from node {node.get('Struct.name', 'unknown')}: not a list or wrong dimension")
+                    del node["Struct.embedding"]
             valid_nodes.append(node)
         
         batch_size = 1000
@@ -1001,6 +1082,12 @@ class DgraphClient:
                     embedding = node_copy.pop("Class.embedding")
                     if name and file:
                         embeddings_to_update.append(("class", name, file, embedding))
+                if "Struct.embedding" in node_copy:
+                    name = node_copy.get("Struct.name", "")
+                    file = node_copy.get("Struct.file", "")
+                    embedding = node_copy.pop("Struct.embedding")
+                    if name and file:
+                        embeddings_to_update.append(("struct", name, file, embedding))
                 
                 batch_without_embeddings.append(node_copy)
             
@@ -1044,13 +1131,16 @@ class DgraphClient:
                 # Group by type for batch updates
                 function_embeddings = {}  # {(name, file): embedding}
                 class_embeddings = {}  # {(name, file): embedding}
+                struct_embeddings = {}  # {(name, file): embedding}
                 
                 # Group embeddings by type
                 for emb_type, name, file, embedding in embeddings_to_update:
                     if emb_type == "function":
                         function_embeddings[(name, file)] = embedding
-                    else:  # class
+                    elif emb_type == "class":
                         class_embeddings[(name, file)] = embedding
+                    elif emb_type == "struct":
+                        struct_embeddings[(name, file)] = embedding
                 
                 # Update function embeddings
                 for (name, file), embedding in function_embeddings.items():
@@ -1342,6 +1432,11 @@ class DgraphClient:
                                         if isinstance(cls, dict) and "id" in cls:
                                             uids_to_delete.append(cls["id"])
                                 
+                                if "containsStruct" in file_node and isinstance(file_node["containsStruct"], list):
+                                    for struct in file_node["containsStruct"]:
+                                        if isinstance(struct, dict) and "id" in struct:
+                                            uids_to_delete.append(struct["id"])
+                                
                                 if "containsImport" in file_node and isinstance(file_node["containsImport"], list):
                                     for imp in file_node["containsImport"]:
                                         if isinstance(imp, dict) and "id" in imp:
@@ -1424,6 +1519,33 @@ class DgraphClient:
                                     if "File.containsFunction" not in n:
                                         n["File.containsFunction"] = []
                                     n["File.containsFunction"].append({"uid": f"_:{func_uid}"})
+                                    break
+                    
+                    # Create Struct nodes (use validation)
+                    struct_uids = {}
+                    for struct_data in new_graph_data.structs:
+                        # Use validation function to ensure required fields
+                        struct_data_with_file = struct_data.copy()
+                        struct_data_with_file["file"] = file_path
+                        struct_node = create_struct_node(struct_data_with_file)
+                        if not struct_node:
+                            logger.warning(f"Invalid Struct node in {file_path}:{struct_data.get('line', 0)}, skipping")
+                            continue
+                        
+                        struct_name = struct_node.name
+                        struct_uid = self._generate_uid(f"{struct_name}@{file_path}")
+                        struct_uids[(struct_name, file_path)] = struct_uid
+                        
+                        node = struct_node.to_dgraph_dict(struct_uid)
+                        nodes.append(node)
+                        
+                        # Add relationship to file
+                        if file_path in file_uids:
+                            for n in nodes:
+                                if n.get("uid") == f"_:{file_uids[file_path]}":
+                                    if "File.containsStruct" not in n:
+                                        n["File.containsStruct"] = []
+                                    n["File.containsStruct"].append({"uid": f"_:{struct_uid}"})
                                     break
                     
                     # Create Class nodes (use validation)
@@ -1563,6 +1685,12 @@ class DgraphClient:
                             embedding = node_copy.pop("Class.embedding")
                             if name and file:
                                 embeddings_to_update.append(("class", name, file, embedding))
+                        if "Struct.embedding" in node_copy:
+                            name = node_copy.get("Struct.name", "")
+                            file = node_copy.get("Struct.file", "")
+                            embedding = node_copy.pop("Struct.embedding")
+                            if name and file:
+                                embeddings_to_update.append(("struct", name, file, embedding))
                         
                         nodes_without_embeddings.append(node_copy)
                     
@@ -1578,12 +1706,15 @@ class DgraphClient:
                         # Group by type
                         function_embeddings = {}  # {(name, file): embedding}
                         class_embeddings = {}  # {(name, file): embedding}
+                        struct_embeddings = {}  # {(name, file): embedding}
                         
                         for emb_type, name, file, embedding in embeddings_to_update:
                             if emb_type == "function":
                                 function_embeddings[(name, file)] = embedding
-                            else:  # class
+                            elif emb_type == "class":
                                 class_embeddings[(name, file)] = embedding
+                            elif emb_type == "struct":
+                                struct_embeddings[(name, file)] = embedding
                         
                         # Update function embeddings
                         for (name, file), embedding in function_embeddings.items():
@@ -1630,6 +1761,29 @@ class DgraphClient:
                                     logger.warning(f"Failed to update class embedding for {name}@{file}: {result.get('errors')}")
                             except Exception as e:
                                 logger.warning(f"Failed to update class embedding for {name}@{file}: {e}")
+                        
+                        # Update struct embeddings
+                        for (name, file), embedding in struct_embeddings.items():
+                            mutation_query = """
+                            mutation($name: String!, $file: String!, $embedding: [Float!]!) {
+                                updateStruct(input: {filter: {name: {eq: $name}, file: {eq: $file}}, set: {embedding: $embedding}}) {
+                                    struct {
+                                        id
+                                        name
+                                    }
+                                }
+                            }
+                            """
+                            try:
+                                result = self.execute_graphql_query(mutation_query, {
+                                    "name": name,
+                                    "file": file,
+                                    "embedding": embedding
+                                })
+                                if "errors" in result:
+                                    logger.warning(f"Failed to update struct embedding for {name}@{file}: {result.get('errors')}")
+                            except Exception as e:
+                                logger.warning(f"Failed to update struct embedding for {name}@{file}: {e}")
                     
                     logger.info(f"Successfully updated graph for file: {file_path}")
                     return True

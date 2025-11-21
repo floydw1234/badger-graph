@@ -218,6 +218,22 @@
                         }
                     },
                     {
+                        selector: 'node[type="struct"]',
+                        style: {
+                            'background-color': '#9c27b0',
+                            'label': 'data(label)',
+                            'width': 50,
+                            'height': 50,
+                            'shape': 'hexagon',
+                            'text-valign': 'center',
+                            'text-halign': 'center',
+                            'color': '#fff',
+                            'font-size': '11px',
+                            'text-wrap': 'wrap',
+                            'text-max-width': '70px'
+                        }
+                    },
+                    {
                         selector: 'edge[type="contains"]',
                         style: {
                             'width': 2,
@@ -367,6 +383,13 @@
                 methods.className = 'info-item';
                 methods.innerHTML = `<span class="info-label">Methods:</span><span class="info-value">${nodeData.methods.join(', ')}</span>`;
                 panel.appendChild(methods);
+            }
+
+            if (nodeData.fields && nodeData.fields.length > 0) {
+                const fields = document.createElement('div');
+                fields.className = 'info-item';
+                fields.innerHTML = `<span class="info-label">Fields:</span><span class="info-value">${nodeData.fields.join(', ')}</span>`;
+                panel.appendChild(fields);
             }
 
             panel.classList.add('visible');

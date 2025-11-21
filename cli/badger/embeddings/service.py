@@ -171,6 +171,48 @@ class EmbeddingService:
             import numpy as np
             return np.zeros(self.EMBEDDING_DIMENSION, dtype=np.float32)
     
+    def generate_struct_embedding(
+        self,
+        name: str,
+        fields: Optional[List[str]] = None
+    ) -> List[float]:
+        """Generate embedding for a struct.
+        
+        Args:
+            name: Struct name
+            fields: List of field names (optional)
+        
+        Returns:
+            List of float values representing the embedding vector
+        """
+        # Build text representation
+        parts = [name]
+        if fields:
+            fields_text = ", ".join(fields)
+            parts.append(f"Fields: {fields_text}")
+        
+        text = "\n".join(parts)
+        
+        try:
+            embedding = self.model.encode(text, convert_to_numpy=True)
+            # Return as numpy array for float32vector compatibility
+            return embedding
+        except RuntimeError as e:
+            if "no kernel image" in str(e).lower() or "not compatible" in str(e).lower():
+                error_msg = (
+                    f"GPU compute capability error when generating embedding for '{name}': {e}. "
+                    f"Your GPU may not be supported by the current PyTorch build. "
+                    f"Consider building PyTorch from source with support for your GPU's compute capability."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg) from e
+            raise
+        except Exception as e:
+            logger.warning(f"Failed to generate struct embedding for '{name}': {e}")
+            # Return zero vector as fallback (numpy array)
+            import numpy as np
+            return np.zeros(self.EMBEDDING_DIMENSION, dtype=np.float32)
+    
     def generate_query_embedding(self, query: str) -> List[float]:
         """Generate embedding for a user query.
         

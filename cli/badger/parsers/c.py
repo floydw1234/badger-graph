@@ -1,9 +1,11 @@
 """C parser using tree-sitter."""
 
+import logging
+import re
 from pathlib import Path
 from tree_sitter import Language, Parser
 from .base import (
-    BaseParser, ParseResult, Function, Class, Import, Position, FunctionCall, Typedef,
+    BaseParser, ParseResult, Function, Class, Struct, Import, Position, FunctionCall, Typedef,
     Macro, Variable, StructFieldAccess, MacroUsage, VariableUsage, TypedefUsage
 )
 
@@ -52,7 +54,7 @@ class CParser(BaseParser):
             
             # Extract information from AST
             functions = self.extract_functions(root_node, source_code)
-            classes = self.extract_classes(root_node)
+            structs = self.extract_structs(root_node)
             imports = self.extract_imports(root_node)
             typedefs = self.extract_typedefs(root_node)
             macros = self.extract_macros(root_node)
@@ -63,8 +65,8 @@ class CParser(BaseParser):
             file_path_str = str(file_path)
             for func in functions:
                 func.file_path = file_path_str
-            for cls in classes:
-                cls.file_path = file_path_str
+            for struct in structs:
+                struct.file_path = file_path_str
             for imp in imports:
                 imp.file_path = file_path_str
             for tdef in typedefs:
@@ -96,7 +98,8 @@ class CParser(BaseParser):
             return ParseResult(
                 file_path=file_path_str,
                 functions=functions,
-                classes=classes,
+                classes=[],  # C doesn't have classes, only structs
+                structs=structs,
                 imports=imports,
                 total_nodes=self.count_nodes(root_node),
                 tree_string=root_node.text.decode("utf-8") if hasattr(root_node, "text") else None,
@@ -319,8 +322,16 @@ class CParser(BaseParser):
         return functions
     
     def extract_classes(self, node) -> list[Class]:
-        """Extract struct, union, and enum definitions (as classes)."""
-        classes = []
+        """Extract class definitions from AST node.
+        
+        C doesn't have classes, only structs. This returns an empty list.
+        Use extract_structs() for C structs/unions/enums.
+        """
+        return []
+    
+    def extract_structs(self, node) -> list[Struct]:
+        """Extract struct, union, and enum definitions."""
+        structs = []
         
         def extract_fields(specifier_node):
             """Extract field names from struct/union/enum."""
@@ -403,7 +414,7 @@ class CParser(BaseParser):
                     # Extract fields
                     fields = extract_fields(specifier)
                     
-                    classes.append(Class(
+                    structs.append(Struct(
                         name=type_name,
                         start=Position(
                             row=n.start_point[0],
@@ -414,20 +425,19 @@ class CParser(BaseParser):
                             column=n.end_point[1]
                         ),
                         file_path="",  # Will be set in parse_file
-                        methods=fields,  # Use methods list to store field names
-                        base_classes=[]  # C doesn't have inheritance
+                        fields=fields
                     ))
             
             # Handle regular struct/union/enum (not typedef)
             elif n.type in ("struct_specifier", "union_specifier", "enum_specifier"):
                 name_node = n.child_by_field_name("name")
                 if name_node:
-                    class_name = name_node.text.decode("utf-8")
+                    struct_name = name_node.text.decode("utf-8")
                     # Extract fields
                     fields = extract_fields(n)
                     
-                    classes.append(Class(
-                        name=class_name,
+                    structs.append(Struct(
+                        name=struct_name,
                         start=Position(
                             row=n.start_point[0],
                             column=n.start_point[1]
@@ -437,15 +447,14 @@ class CParser(BaseParser):
                             column=n.end_point[1]
                         ),
                         file_path="",  # Will be set in parse_file
-                        methods=fields,  # Use methods list to store field names
-                        base_classes=[]  # C doesn't have inheritance
+                        fields=fields
                     ))
             
             for i in range(n.child_count):
                 walk_tree(n.child(i))
         
         walk_tree(node)
-        return classes
+        return structs
     
     def extract_imports(self, node) -> list[Import]:
         """Extract include directives (as imports)."""
@@ -470,6 +479,21 @@ class CParser(BaseParser):
                     module = child.text.decode("utf-8").strip('"')
                     is_system_include = False
                     break
+            
+            # Fallback: parse from text if tree-sitter didn't find it
+            # This ensures module is always set, which is required by the schema
+            if module is None:
+                # Try to extract from #include "..." or #include <...>
+                match = re.search(r'#include\s+["<]([^">]+)[">]', import_text)
+                if match:
+                    module = match.group(1)
+                    is_system_include = '<' in import_text
+                else:
+                    # Last resort: use the text itself (shouldn't happen for valid includes)
+                    # Log a warning but still set module to avoid schema violations
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Could not extract module from include: {import_text}")
+                    module = import_text.strip()
             
             # Store module name, and use imported_items to indicate system vs local
             imported_items = []
