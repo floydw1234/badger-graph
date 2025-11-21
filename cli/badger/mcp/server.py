@@ -6,6 +6,7 @@ import logging
 import sys
 from typing import Any, Optional, Sequence
 
+from toon_py import encode
 from ..graph.dgraph import DgraphClient
 from ..graph.indexer import index_workspace
 from ..embeddings.service import EmbeddingService
@@ -70,13 +71,13 @@ def create_mcp_server(
             ),
             Tool(
                 name="get_include_dependencies",
-                description="Get all files that transitively import (Python) or include (C/C++) this file. Automatically detects language from file extension (.py for Python, .c/.h for C). Use this before modifying a file to see impact. Returns the full dependency tree.",
+                description="Find all files that DEPEND ON the target file (reverse dependencies). Returns files that import (Python) or include (C/C++) the target file, NOT files that the target imports/includes. Automatically detects language from file extension (.py for Python, .c/.h for C). Use this before modifying a file to see which files will be affected. Returns transitive dependencies (files that include files that include the target). Example: For 'gossipApi.h', returns files like 'main.c' that include it, not files that 'gossipApi.h' itself includes.",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "file_path": {
                             "type": "string",
-                            "description": "Path to file (Python .py or C/C++ .c/.h)"
+                            "description": "Path to file (Python .py or C/C++ .c/.h) to find reverse dependencies for"
                         }
                     },
                     "required": ["file_path"]

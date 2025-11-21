@@ -1847,6 +1847,7 @@ class DgraphClient:
                         id
                         name
                         file
+                        line
                         signature
                         docstring
                         embedding
@@ -1895,6 +1896,7 @@ class DgraphClient:
                         results["functions"].append({
                             "name": func.get("name", ""),
                             "file": func.get("file", ""),
+                            "line": func.get("line", 0),
                             "signature": func.get("signature", ""),
                             "docstring": func.get("docstring", ""),
                             "vector_distance": item["distance"]
@@ -1914,6 +1916,7 @@ class DgraphClient:
                         id
                         name
                         file
+                        line
                         methods
                         embedding
                     }
@@ -1959,6 +1962,7 @@ class DgraphClient:
                         results["classes"].append({
                             "name": cls.get("name", ""),
                             "file": cls.get("file", ""),
+                            "line": cls.get("line", 0),
                             "methods": cls.get("methods", []),
                             "vector_distance": item["distance"]
                         })

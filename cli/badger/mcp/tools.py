@@ -578,11 +578,11 @@ async def get_include_dependencies(
                 if not isinstance(imp, dict):
                     continue
                 module = imp.get("Import.module", "")
-                file_path = imp.get("Import.file", "")
-                if not module or not file_path:
+                importing_file = imp.get("Import.file", "")
+                if not module or not importing_file:
                     continue
                 
-                module_to_files[module].append(file_path)
+                module_to_files[module].append(importing_file)
                 filename = module.split("/")[-1]
                 filename_to_modules[filename].add(module)
             
