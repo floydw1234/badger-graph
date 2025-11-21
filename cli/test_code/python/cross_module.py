@@ -6,18 +6,26 @@ from sample_app import (
     User,
     UserService,
     validate_email,
-    DEFAULT_CONFIG_PATH
+    DEFAULT_CONFIG_PATH,
+    test_func 
 )
 from sample_app import User as AppUser
 import sample_app
 
+import numpy as np
+
+
+
+
 def create_test_user() -> User:
     """Create a user using imported class."""
+    test_func()
+    # Test comment to trigger re-indexing - testing hash cache
     return User(
         id=999,
         name="Test User",
         email="test@example.com"
-    )
+    ) #test comment yayayayayaahaha
 
 def use_service() -> None:
     """Use the imported service."""
@@ -55,11 +63,19 @@ def call_module_function():
     result = sample_app.validate_email("module@example.com")
     print(f"Module function result: {result}")
 
+def new_function_for_testing() -> str:
+    """This is a new function added to test embedding regeneration.
+    
+    This function should trigger a cache miss and cause embedding generation.
+    """
+    return "This function was added to test hash cache and embedding regeneration"
+
 def main():
     """Test cross-module imports and calls."""
     # Direct class usage
     user1 = create_test_user()
     print(f"Created user: {user1.name}")
+    
     
     # Service usage
     use_service()
@@ -78,6 +94,10 @@ def main():
     
     # Module namespace access
     call_module_function()
+    
+    # Test new function
+    result = new_function_for_testing()
+    print(f"New function result: {result}")
 
 if __name__ == "__main__":
     main()

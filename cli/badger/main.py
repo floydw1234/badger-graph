@@ -20,6 +20,9 @@ from .config import load_config, save_config, BadgerConfig
 from .parsers import PythonParser, CParser, BaseParser
 from .utils import find_source_files, detect_language, read_file_content
 from .graph import build_graph, DgraphClient, GraphData
+from .graph.indexer import index_and_build_graph
+from .graph.workspace_metadata import save_workspace_path, load_workspace_path, clear_workspace_metadata
+from .graph.hash_cache import HashCache
 from .query import parse_query
 from .mcp.server import run_mcp_server
 
@@ -47,64 +50,20 @@ def index_directory(
     """Index a directory and return parse results and graph data."""
     console.print(f"[dim]Indexing directory: {directory}[/dim]")
     
-    # Find source files
-    source_files = find_source_files(directory, language=language)
-    
-    if not source_files:
-        console.print("[yellow]No source files found[/yellow]")
-        return [], GraphData()
-    
-    # Parse files
-    parse_results = []
-    parsers: dict[str, BaseParser] = {}
-    
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-        transient=True
-    ) as progress:
-        task = progress.add_task("Parsing files...", total=len(source_files))
-        
-        for file_path in source_files:
-            # Detect or use specified language
-            file_language = language or detect_language(file_path)
-            
-            if not file_language:
-                progress.update(task, advance=1)
-                continue
-            
-            # Get or create parser
-            if file_language not in parsers:
-                try:
-                    parsers[file_language] = get_parser(file_language)
-                except Exception as e:
-                    if config.verbose:
-                        console.print(f"[red]Failed to initialize {file_language} parser: {e}[/red]")
-                    progress.update(task, advance=1)
-                    continue
-            
-            parser = parsers[file_language]
-            
-            # Parse file
-            try:
-                result = parser.parse_file(file_path)
-                parse_results.append(result)
-            except Exception as e:
-                if config.verbose:
-                    console.print(f"[red]Failed to parse {file_path}: {e}[/red]")
-            
-            progress.update(task, advance=1)
+    # Use the extracted indexing function
+    parse_results, graph_data = index_and_build_graph(
+        directory,
+        language=language,
+        verbose=config.verbose
+    )
     
     if not parse_results:
         return [], GraphData()
     
-    # Build graph
-    graph_data = build_graph(parse_results)
-    
-    # Save to .badger-index directory
-    output_dir = directory / ".badger-index"
-    output_dir.mkdir(exist_ok=True)
+    # Save to user-level ~/.badger/ directory (since only one workspace at a time)
+    from .graph.workspace_metadata import get_user_badger_dir
+    output_dir = get_user_badger_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     files_dir = output_dir / "files"
     files_dir.mkdir(exist_ok=True)
@@ -173,7 +132,15 @@ def index_directory(
     if dgraph_client:
         console.print("[dim]Updating graph database...[/dim]")
         try:
-            if dgraph_client.insert_graph(graph_data, strict_validation=strict_validation):
+            # Initialize hash cache for incremental indexing (stored in user-level location)
+            from .graph.hash_cache import get_user_hash_cache_path
+            cache_file = get_user_hash_cache_path()
+            hash_cache = HashCache(cache_file)
+            
+            if hash_cache.get_cache_size() > 0:
+                console.print(f"[dim]Hash cache: {hash_cache.get_cache_size()} nodes cached[/dim]")
+            
+            if dgraph_client.insert_graph(graph_data, strict_validation=strict_validation, hash_cache=hash_cache):
                 console.print("[green]✓ Graph database updated[/green]")
             else:
                 console.print("[yellow]⚠ Graph database update not yet implemented[/yellow]")
@@ -612,6 +579,35 @@ def index(
         title="Indexing"
     ))
     
+    # Check if a different workspace is already indexed
+    existing_workspace = load_workspace_path(work_dir)
+    if existing_workspace and existing_workspace != work_dir.resolve():
+        console.print(f"[yellow]Warning: Different workspace already indexed: {existing_workspace}[/yellow]")
+        console.print(f"[yellow]Current workspace: {work_dir.resolve()}[/yellow]")
+        if Confirm.ask("[yellow]Clear graph and re-index with new workspace?[/yellow]", default=True):
+            # Clear graph database
+            console.print("[dim]Clearing graph database...[/dim]")
+            dgraph_client = DgraphClient(config.graphdb_endpoint)
+            try:
+                import pydgraph
+                op = pydgraph.Operation(drop_all=True)
+                dgraph_client.client.alter(op)
+                # Re-initialize schema
+                dgraph_client.setup_graphql_schema()
+                # Clear hash cache from user-level location
+                from .graph.hash_cache import get_user_hash_cache_path
+                cache_file = get_user_hash_cache_path()
+                if cache_file.exists():
+                    HashCache(cache_file).clear_cache()
+                clear_workspace_metadata(existing_workspace)
+                console.print("[green]✓ Graph cleared[/green]")
+            except Exception as e:
+                console.print(f"[red]Error clearing graph: {e}[/red]")
+                raise typer.Exit(1)
+        else:
+            console.print("[yellow]Indexing cancelled[/yellow]")
+            raise typer.Exit(0)
+    
     # Initialize Dgraph client
     dgraph_client = DgraphClient(config.graphdb_endpoint)
     
@@ -622,6 +618,11 @@ def index(
     else:
         console.print("[dim]Strict validation: disabled (will skip invalid nodes)[/dim]")
     parse_results, graph_data = index_directory(work_dir, config, language, dgraph_client=dgraph_client, strict_validation=strict)
+    
+    # Save workspace path after successful indexing
+    if parse_results:
+        save_workspace_path(work_dir)
+        console.print(f"[dim]Workspace path saved: {work_dir.resolve()}[/dim]")
     
     if not parse_results:
         console.print("[yellow]No files to index.[/yellow]")
@@ -771,6 +772,7 @@ def mcp_server(
     endpoint: Optional[str] = typer.Option(None, "--endpoint", "-e", help="Graph database endpoint URL (default: local from .badgerrc or http://localhost:8080)"),
     workspace_path: Optional[Path] = typer.Option(None, "--workspace", "-w", help="Path to workspace/codebase root (default: current directory or BADGER_WORKSPACE_PATH env var)"),
     auto_index: bool = typer.Option(False, "--auto-index", help="Enable automatic indexing on startup"),
+    watch: bool = typer.Option(False, "--watch", help="Watch for file changes and automatically update graph (10 second debounce)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
 ):
     """Start the MCP server for Model Context Protocol.
@@ -782,6 +784,8 @@ def mcp_server(
     By default, the server does not automatically index the workspace. 
     Use --auto-index to enable automatic indexing on startup, or run 'badger index' separately.
     
+    Use --watch to enable file watching. The watcher will re-index the workspace when files change
+    (with 10 second debounce) and update only changed nodes using hash cache.
     """
     import asyncio
     import logging
@@ -807,6 +811,8 @@ def mcp_server(
     console.print(f"[dim]Graph database: {endpoint}[/dim]")
     if workspace:
         console.print(f"[dim]Workspace: {workspace}[/dim]")
+    if watch:
+        console.print("[dim]File watching: enabled (10 second debounce)[/dim]")
     console.print("[dim]Server will communicate via stdio[/dim]\n")
     
     try:
@@ -814,7 +820,8 @@ def mcp_server(
         asyncio.run(run_mcp_server(
             dgraph_endpoint=endpoint,
             workspace_path=workspace,
-            auto_index=auto_index
+            auto_index=auto_index,
+            watch=watch
         ))
     except KeyboardInterrupt:
         console.print("\n[yellow]Server shutdown requested[/yellow]")
@@ -1143,22 +1150,37 @@ def clear(
         else:
             console.print("[yellow]⚠ Schema setup may have failed. Run 'badger init_graph' if needed.[/yellow]")
         
-        # Clear hash cache (search in current directory and common locations)
-        from .graph.hash_cache import HashCache
-        work_dir = Path.cwd()
-        cache_file = work_dir / ".badger-index" / "node_hashes.json"
+        # Clear all data from user-level ~/.badger/ directory
+        from .graph.hash_cache import HashCache, get_user_hash_cache_path
+        from .graph.workspace_metadata import clear_workspace_metadata, get_user_badger_dir
+        
+        badger_dir = get_user_badger_dir()
+        
+        # Clear workspace metadata
+        clear_workspace_metadata()
+        console.print(f"[green]✓ Workspace metadata cleared[/green]")
+        
+        # Clear hash cache
+        cache_file = get_user_hash_cache_path()
         if cache_file.exists():
             hash_cache = HashCache(cache_file)
             hash_cache.clear_cache()
             console.print("[green]✓ Hash cache cleared[/green]")
-        else:
-            # Try to find cache files in subdirectories
-            cache_files = list(work_dir.rglob(".badger-index/node_hashes.json"))
-            if cache_files:
-                for cache_file in cache_files:
-                    hash_cache = HashCache(cache_file)
-                    hash_cache.clear_cache()
-                console.print(f"[green]✓ Cleared {len(cache_files)} hash cache file(s)[/green]")
+        
+        # Clear index files (files/, index.json, relationships.json, graph.json)
+        import shutil
+        files_dir = badger_dir / "files"
+        if files_dir.exists():
+            shutil.rmtree(files_dir)
+            console.print("[green]✓ Index files directory cleared[/green]")
+        
+        for file_name in ["index.json", "relationships.json", "graph.json"]:
+            file_path = badger_dir / file_name
+            if file_path.exists():
+                file_path.unlink()
+        
+        if any((badger_dir / f).exists() for f in ["index.json", "relationships.json", "graph.json"]):
+            console.print("[green]✓ Index files cleared[/green]")
             
     except Exception as e:
         console.print(f"[red]Error clearing graph: {e}[/red]")

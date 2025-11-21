@@ -7,8 +7,6 @@ from typing import Optional, Tuple
 from ..parsers import PythonParser, CParser, BaseParser
 from ..utils import find_source_files, detect_language
 from .builder import build_graph, GraphData
-from .dgraph import DgraphClient
-from .hash_cache import HashCache
 from ..parsers.base import ParseResult
 
 logger = logging.getLogger(__name__)
@@ -24,23 +22,21 @@ def get_parser(language: str) -> BaseParser:
         raise ValueError(f"Unsupported language: {language}")
 
 
-def index_workspace(
+def index_and_build_graph(
     workspace_path: Path,
-    dgraph_client: DgraphClient,
     language: Optional[str] = None,
-    auto_index: bool = True,
-    strict_validation: bool = True
+    verbose: bool = False
 ) -> Tuple[list[ParseResult], GraphData]:
-    """Index a workspace and optionally update the graph database.
+    """Index a workspace and build graph from parse results.
     
-    This is a simplified version of index_directory that doesn't use Rich console
-    output, suitable for use in the MCP server.
+    This is a reusable function that extracts the core indexing logic.
+    It does not include Rich console output or file saving - those are handled
+    by the caller (e.g., main.py's index_directory).
     
     Args:
         workspace_path: Path to workspace/codebase root
-        dgraph_client: Dgraph client instance (with namespace already set)
         language: Optional language filter (python, c). Auto-detect if not specified.
-        auto_index: If True, automatically insert into graph database
+        verbose: Enable verbose logging
     
     Returns:
         Tuple of (parse_results, graph_data)
@@ -82,7 +78,10 @@ def index_workspace(
             result = parser.parse_file(file_path)
             parse_results.append(result)
         except Exception as e:
-            logger.warning(f"Failed to parse {file_path}: {e}")
+            if verbose:
+                logger.warning(f"Failed to parse {file_path}: {e}")
+            else:
+                logger.debug(f"Failed to parse {file_path}: {e}")
     
     if not parse_results:
         logger.warning("No files successfully parsed")
@@ -92,37 +91,14 @@ def index_workspace(
     logger.info("Building graph from parse results")
     graph_data = build_graph(parse_results)
     
-    # Insert into graph database if requested
-    if auto_index and dgraph_client:
-        logger.info("Inserting graph into database")
-        try:
-            # Initialize hash cache for incremental indexing
-            cache_file = workspace_path / ".badger-index" / "node_hashes.json"
-            hash_cache = HashCache(cache_file)
-            
-            if hash_cache.get_cache_size() > 0:
-                logger.info(f"Hash cache: {hash_cache.get_cache_size()} nodes cached")
-            
-            if dgraph_client.insert_graph(graph_data, strict_validation=strict_validation, hash_cache=hash_cache):
-                logger.info(f"Successfully indexed {len(parse_results)} files")
-                logger.info(f"  - {len(graph_data.functions)} functions")
-                logger.info(f"  - {len(graph_data.classes)} classes")
-                if hasattr(graph_data, 'structs') and graph_data.structs:
-                    logger.info(f"  - {len(graph_data.structs)} structs")
-                logger.info(f"  - {len(graph_data.imports)} imports")
-                if hasattr(graph_data, 'macros') and graph_data.macros:
-                    logger.info(f"  - {len(graph_data.macros)} macros")
-                if hasattr(graph_data, 'variables') and graph_data.variables:
-                    logger.info(f"  - {len(graph_data.variables)} variables")
-            else:
-                logger.error("Failed to insert graph into database")
-        except ValueError as e:
-            # Validation error in strict mode
-            logger.error(f"Validation error: {e}", exc_info=True)
-            raise
-        except Exception as e:
-            logger.error(f"Error inserting graph: {e}", exc_info=True)
-            raise
+    logger.info(f"Graph built: {len(graph_data.functions)} functions, {len(graph_data.classes)} classes")
+    if hasattr(graph_data, 'structs') and graph_data.structs:
+        logger.info(f"  - {len(graph_data.structs)} structs")
+    logger.info(f"  - {len(graph_data.imports)} imports")
+    if hasattr(graph_data, 'macros') and graph_data.macros:
+        logger.info(f"  - {len(graph_data.macros)} macros")
+    if hasattr(graph_data, 'variables') and graph_data.variables:
+        logger.info(f"  - {len(graph_data.variables)} variables")
     
     return parse_results, graph_data
 

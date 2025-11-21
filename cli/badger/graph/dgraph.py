@@ -19,7 +19,7 @@ from .validation import (
     create_import_node, create_macro_node, create_variable_node,
     create_typedef_node, create_struct_field_access_node
 )
-from .hash_cache import HashCache, calculate_node_hash
+from .hash_cache import HashCache, calculate_node_hash, calculate_node_hash_from_dgraph_node
 from ..embeddings.service import EmbeddingService
 from typing import TYPE_CHECKING
 
@@ -268,8 +268,21 @@ class DgraphClient:
         validation_failures = []
         cache_stats = {
             "skipped": 0,
-            "inserted": 0
+            "inserted": 0,
+            "total_checked": 0,
+            "hits": 0,
+            "misses": 0
         }
+        
+        # Log hash cache status at start
+        if hash_cache:
+            cache_size = hash_cache.get_cache_size()
+            cache_file = hash_cache.cache_file
+            logger.info(f"Hash cache: {cache_size} hashes loaded, file: {cache_file}")
+            if not cache_file.exists():
+                logger.warning(f"Hash cache file does not exist: {cache_file}")
+        else:
+            logger.info("No hash cache provided - all nodes will be inserted")
         
         # Build UID maps for all nodes
         file_uids = {}
@@ -299,7 +312,6 @@ class DgraphClient:
             
             node = file_node.to_dgraph_dict(file_uid)
             nodes.append(node)
-            cache_stats["inserted"] += 1
             
         # Create Function nodes
         for func_data in graph_data.functions:
@@ -315,54 +327,21 @@ class DgraphClient:
             func_uid = self._generate_uid(f"{func_name}@{func_file}")
             function_uids[(func_name, func_file)] = func_uid
             
-            # Generate embedding
-            try:
-                embedding_service = self._get_embedding_service()
-                logger.info(f"Generating embedding for function '{func_name}' with signature={func_node.signature}, docstring={func_node.docstring}")
-                embedding = embedding_service.generate_function_embedding(
-                    name=func_name,
-                    signature=func_node.signature,
-                    docstring=func_node.docstring
-                )
-                if embedding is not None and len(embedding) > 0:
-                    # For float32vector type, convert numpy array to list of Python floats
-                    # Dgraph expects a plain Python list for float32vector type
-                    try:
-                        if isinstance(embedding, np.ndarray):
-                            # Convert to float32 numpy array first, then to plain Python list
-                            embedding_f32 = embedding.astype(np.float32)
-                            # Convert to list and ensure all are Python floats (not numpy scalars)
-                            embedding_list = [float(x) for x in embedding_f32.tolist()]
-                        elif isinstance(embedding, list):
-                            # Ensure all values are Python floats (not numpy types)
-                            embedding_list = [float(x) for x in embedding]
-                        else:
-                            embedding_list = [float(x) for x in list(embedding)]
-                        
-                        # Validate embedding: must be correct dimension and contain valid floats
-                        if len(embedding_list) == EmbeddingService.EMBEDDING_DIMENSION and all(
-                            isinstance(x, float) and not (np.isnan(x) or np.isinf(x)) 
-                            for x in embedding_list
-                        ):
-                            func_node.embedding = embedding_list
-                            logger.info(f"Successfully generated embedding for function '{func_name}' (dimension: {len(embedding_list)})")
-                        else:
-                            logger.warning(f"Invalid embedding for function '{func_name}': dimension={len(embedding_list)}, expected={EmbeddingService.EMBEDDING_DIMENSION}, contains_nan={any(np.isnan(x) for x in embedding_list) if len(embedding_list) > 0 else False}")
-                    except Exception as e:
-                        logger.warning(f"Failed to format embedding for function '{func_name}': {e}")
-                else:
-                    logger.warning(f"Generated empty or None embedding for function '{func_name}'")
-            except Exception as e:
-                logger.warning(f"Failed to generate embedding for function '{func_name}': {e}", exc_info=True)
-                # Continue without embedding rather than failing the entire insertion
+            # Build node dict WITHOUT embedding (embedding will be added after relationships)
+            node = func_node.to_dgraph_dict(func_uid)
             
             # Store belongs_to_class for later relationship creation
             if func_node.belongs_to_class:
                 func_data["belongs_to_class"] = func_node.belongs_to_class
             
-            node = func_node.to_dgraph_dict(func_uid)
+            # Store function node data for embedding generation later
+            node["_func_data"] = {
+                "name": func_name,
+                "signature": func_node.signature,
+                "docstring": func_node.docstring
+            }
+            
             nodes.append(node)
-            cache_stats["inserted"] += 1
             
         # Create Class nodes
         for cls_data in graph_data.classes:
@@ -378,49 +357,16 @@ class DgraphClient:
             cls_uid = self._generate_uid(f"{cls_name}@{cls_file}")
             class_uids[(cls_name, cls_file)] = cls_uid
             
-            # Generate embedding
-            try:
-                embedding_service = self._get_embedding_service()
-                logger.info(f"Generating embedding for class '{cls_name}' with methods={cls_node.methods}")
-                embedding = embedding_service.generate_class_embedding(
-                    name=cls_name,
-                    methods=cls_node.methods
-                )
-                if embedding is not None and len(embedding) > 0:
-                    # For float32vector type, convert numpy array to list of Python floats
-                    # Dgraph expects a plain Python list for float32vector type
-                    try:
-                        if isinstance(embedding, np.ndarray):
-                            # Convert to float32 numpy array first, then to plain Python list
-                            embedding_f32 = embedding.astype(np.float32)
-                            # Convert to list and ensure all are Python floats (not numpy scalars)
-                            embedding_list = [float(x) for x in embedding_f32.tolist()]
-                        elif isinstance(embedding, list):
-                            # Ensure all values are Python floats (not numpy types)
-                            embedding_list = [float(x) for x in embedding]
-                        else:
-                            embedding_list = [float(x) for x in list(embedding)]
-                        
-                        # Validate embedding: must be correct dimension and contain valid floats
-                        if len(embedding_list) == EmbeddingService.EMBEDDING_DIMENSION and all(
-                            isinstance(x, float) and not (np.isnan(x) or np.isinf(x)) 
-                            for x in embedding_list
-                        ):
-                            cls_node.embedding = embedding_list
-                            logger.info(f"Successfully generated embedding for class '{cls_name}' (dimension: {len(embedding_list)})")
-                        else:
-                            logger.warning(f"Invalid embedding for class '{cls_name}': dimension={len(embedding_list)}, expected={EmbeddingService.EMBEDDING_DIMENSION}, contains_nan={any(np.isnan(x) for x in embedding_list) if len(embedding_list) > 0 else False}")
-                    except Exception as e:
-                        logger.warning(f"Failed to format embedding for class '{cls_name}': {e}")
-                else:
-                    logger.warning(f"Generated empty or None embedding for class '{cls_name}'")
-            except Exception as e:
-                logger.warning(f"Failed to generate embedding for class '{cls_name}': {e}", exc_info=True)
-                # Continue without embedding rather than failing the entire insertion
-            
+            # Build node dict WITHOUT embedding (embedding will be added after relationships)
             node = cls_node.to_dgraph_dict(cls_uid)
+            
+            # Store class node data for embedding generation later
+            node["_cls_data"] = {
+                "name": cls_name,
+                "methods": cls_node.methods
+            }
+            
             nodes.append(node)
-            cache_stats["inserted"] += 1
             
         # Create Struct nodes
         struct_uids: Dict[tuple[str, str], str] = {}
@@ -438,49 +384,16 @@ class DgraphClient:
             struct_uid = self._generate_uid(f"{struct_name}@{struct_file}@{struct_line}")
             struct_uids[(struct_name, struct_file)] = struct_uid
             
-            # Generate embedding for struct
-            try:
-                embedding_service = self._get_embedding_service()
-                logger.info(f"Generating embedding for struct '{struct_name}' with fields={struct_node.fields}")
-                embedding = embedding_service.generate_struct_embedding(
-                    name=struct_name,
-                    fields=struct_node.fields
-                )
-                if embedding is not None and len(embedding) > 0:
-                    # For float32vector type, convert numpy array to list of Python floats
-                    # Dgraph expects a plain Python list for float32vector type
-                    try:
-                        if isinstance(embedding, np.ndarray):
-                            # Convert to float32 numpy array first, then to plain Python list
-                            embedding_f32 = embedding.astype(np.float32)
-                            # Convert to list and ensure all are Python floats (not numpy scalars)
-                            embedding_list = [float(x) for x in embedding_f32.tolist()]
-                        elif isinstance(embedding, list):
-                            # Ensure all values are Python floats (not numpy types)
-                            embedding_list = [float(x) for x in embedding]
-                        else:
-                            embedding_list = [float(x) for x in list(embedding)]
-                        
-                        # Validate embedding: must be correct dimension and contain valid floats
-                        if len(embedding_list) == EmbeddingService.EMBEDDING_DIMENSION and all(
-                            isinstance(x, float) and not (np.isnan(x) or np.isinf(x)) 
-                            for x in embedding_list
-                        ):
-                            struct_node.embedding = embedding_list
-                            logger.info(f"Successfully generated embedding for struct '{struct_name}' (dimension: {len(embedding_list)})")
-                        else:
-                            logger.warning(f"Invalid embedding for struct '{struct_name}': dimension={len(embedding_list)}, expected={EmbeddingService.EMBEDDING_DIMENSION}, contains_nan={any(np.isnan(x) for x in embedding_list) if len(embedding_list) > 0 else False}")
-                    except Exception as e:
-                        logger.warning(f"Error processing embedding for struct '{struct_name}': {e}")
-                else:
-                    logger.warning(f"Generated empty or None embedding for struct '{struct_name}'")
-            except Exception as e:
-                logger.warning(f"Failed to generate embedding for struct '{struct_name}': {e}", exc_info=True)
-                # Continue without embedding rather than failing the entire insertion
-            
+            # Build node dict WITHOUT embedding (embedding will be added after relationships)
             node = struct_node.to_dgraph_dict(struct_uid)
+            
+            # Store struct node data for embedding generation later
+            node["_struct_data"] = {
+                "name": struct_name,
+                "fields": struct_node.fields
+            }
+            
             nodes.append(node)
-            cache_stats["inserted"] += 1
         
         # Create Import nodes
         for imp_data in graph_data.imports:
@@ -499,7 +412,6 @@ class DgraphClient:
             
             node = imp_node.to_dgraph_dict(imp_uid)
             nodes.append(node)
-            cache_stats["inserted"] += 1
             
         # Create Macro nodes
         for macro_data in graph_data.macros:
@@ -518,7 +430,6 @@ class DgraphClient:
             
             node = macro_node.to_dgraph_dict(macro_uid)
             nodes.append(node)
-            cache_stats["inserted"] += 1
             
         # Create Variable nodes
         for var_data in graph_data.variables:
@@ -537,7 +448,6 @@ class DgraphClient:
             
             node = var_node.to_dgraph_dict(var_uid)
             nodes.append(node)
-            cache_stats["inserted"] += 1
             
         # Create Typedef nodes
         for tdef_data in graph_data.typedefs:
@@ -556,7 +466,6 @@ class DgraphClient:
             
             node = tdef_node.to_dgraph_dict(tdef_uid)
             nodes.append(node)
-            cache_stats["inserted"] += 1
             
         # Create StructFieldAccess nodes
         for sfa_data in graph_data.struct_field_accesses:
@@ -576,7 +485,6 @@ class DgraphClient:
             
             node = sfa_node.to_dgraph_dict(sfa_uid)
             nodes.append(node)
-            cache_stats["inserted"] += 1
             
         # Create sets of UIDs that are actually being inserted (not skipped)
         # This prevents creating relationships to nodes that don't exist in the current mutation
@@ -589,6 +497,7 @@ class DgraphClient:
         inserted_typedef_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Typedef"}
         
         # Add relationships
+        logger.info(f"Adding relationships to {len(nodes)} nodes")
         relationship_stats = {
             "function_call": {"total": 0, "created": 0, "caller_not_found": 0, "callee_not_found": 0},
             "inheritance": {"total": 0, "created": 0, "derived_not_found": 0, "base_not_found": 0},
@@ -980,6 +889,236 @@ class DgraphClient:
                                     node["StructFieldAccess.accessesStruct"] = {"uid": f"_:{struct_uid}"}
                                     break
         
+        # Log relationship info for first node with relationships (for debugging)
+        for node in nodes[:1]:  # Just check first node
+            relationship_keys = [k for k in node.keys() if any(rel_type in k for rel_type in [
+                "callsFunction", "calledByFunction", "inheritsClass", "containsFunction",
+                "containsClass", "containsImport", "usesMacro", "usesVariable", "usesTypedef"
+            ])]
+            if relationship_keys:
+                logger.debug(f"First node relationships: {', '.join(relationship_keys)}")
+                for rel_key in relationship_keys[:3]:  # Sample first 3
+                    rel_list = node.get(rel_key, [])
+                    if isinstance(rel_list, list) and len(rel_list) > 0:
+                        sample_uids = [item.get("uid", "")[:20] for item in rel_list[:3]]
+                        logger.debug(f"  {rel_key}: {len(rel_list)} items, sample UIDs: {sample_uids}")
+                break
+        
+        # NOW that all relationships are added, check hash cache and generate embeddings
+        # This ensures the hash includes relationships, matching what's in the database
+        nodes_to_insert = []
+        debug_logged_count = 0  # Track how many nodes we've logged in detail
+        for node in nodes:
+            # Check hash cache (node now has relationships)
+            should_skip = False
+            if hash_cache:
+                node_hash = calculate_node_hash_from_dgraph_node(node)
+                cache_stats["total_checked"] += 1
+                
+                # Get node identifier for logging
+                node_type = "unknown"
+                node_name = "unknown"
+                node_file = "unknown"
+                if "Function.name" in node:
+                    node_type = "function"
+                    node_name = node.get("Function.name", "unknown")
+                    node_file = node.get("Function.file", "unknown")
+                elif "Class.name" in node:
+                    node_type = "class"
+                    node_name = node.get("Class.name", "unknown")
+                    node_file = node.get("Class.file", "unknown")
+                elif "Struct.name" in node:
+                    node_type = "struct"
+                    node_name = node.get("Struct.name", "unknown")
+                    node_file = node.get("Struct.file", "unknown")
+                elif "File.path" in node:
+                    node_type = "file"
+                    node_name = node.get("File.path", "unknown")
+                    node_file = node_name
+                elif "Import.module" in node:
+                    node_type = "import"
+                    node_name = node.get("Import.module", "unknown")
+                    node_file = node.get("Import.file", "unknown")
+                
+                # Log first 5 nodes in detail
+                if debug_logged_count < 5 and node_hash:
+                    hash_prefix = node_hash[:12] if len(node_hash) >= 12 else node_hash
+                    logger.info(f"Checking hash for {node_type} '{node_name}' in {node_file}")
+                    logger.info(f"Hash: {hash_prefix}...")
+                    # For Function/Class nodes, log all fields to see what's different
+                    if node_type in ["function", "class"]:
+                        all_keys = sorted(node.keys())
+                        logger.info(f"  All node keys ({len(all_keys)}): {', '.join(all_keys)}")
+                        # Check if line/column are in the node (they should be excluded from hash)
+                        has_line_in_node = f"{node_type.capitalize()}.line" in node
+                        has_column_in_node = f"{node_type.capitalize()}.column" in node
+                        logger.info(f"  Node has {node_type.capitalize()}.line: {has_line_in_node}, {node_type.capitalize()}.column: {has_column_in_node}")
+                        # These should be in the node but NOT in the hash
+                    # Log relationship info for debugging
+                    relationship_keys = [k for k in node.keys() if any(rel_type in k for rel_type in [
+                        "callsFunction", "calledByFunction", "inheritsClass", "containsFunction",
+                        "containsClass", "containsImport", "usesMacro", "usesVariable", "usesTypedef"
+                    ])]
+                    if relationship_keys:
+                        logger.info(f"  Relationships: {', '.join(relationship_keys)}")
+                        for rel_key in relationship_keys[:2]:  # Sample first 2
+                            rel_list = node.get(rel_key, [])
+                            if isinstance(rel_list, list) and len(rel_list) > 0:
+                                sample_uids = [item.get("uid", "") for item in rel_list[:3]]
+                                logger.info(f"    {rel_key}: {len(rel_list)} items, sample UIDs: {sample_uids}")
+                
+                if node_hash and hash_cache.has_hash(node_hash):
+                    # Skip this cached node - it's unchanged, don't generate embedding
+                    cache_stats["skipped"] += 1
+                    cache_stats["hits"] += 1
+                    if debug_logged_count < 5:
+                        logger.info(f"[HIT] Found in cache - skipping {node_type} '{node_name}'")
+                        debug_logged_count += 1
+                    logger.debug(f"Skipping cached {node_type} '{node_name}'")
+                    should_skip = True
+                elif node_hash:
+                    # New or changed node - will add hash to cache after embedding generation
+                    cache_stats["misses"] += 1
+                    if debug_logged_count < 5:
+                        logger.info(f"[MISS] Not in cache - will insert {node_type} '{node_name}'")
+                        # Log why it's a miss - check if it's from the changed file
+                        if node_file.endswith("cross_module.py"):
+                            logger.info(f"  -> This is from the modified file (expected miss)")
+                        else:
+                            logger.warning(f"  -> UNEXPECTED: This is from '{node_file}' which was NOT modified!")
+                            # Log relationship info to see what might have changed
+                            relationship_keys = [k for k in node.keys() if any(rel_type in k for rel_type in [
+                                "callsFunction", "calledByFunction", "inheritsClass", "containsFunction",
+                                "containsClass", "containsImport", "usesMacro", "usesVariable", "usesTypedef"
+                            ])]
+                            if relationship_keys:
+                                logger.warning(f"  -> Has relationships: {', '.join(relationship_keys)}")
+                                for rel_key in relationship_keys[:2]:
+                                    rel_list = node.get(rel_key, [])
+                                    if isinstance(rel_list, list) and len(rel_list) > 0:
+                                        sample_uids = [item.get("uid", "") for item in rel_list[:3]]
+                                        logger.warning(f"    {rel_key}: {len(rel_list)} items, UIDs: {sample_uids}")
+                        debug_logged_count += 1
+            
+            if should_skip:
+                continue
+            
+            # Generate embeddings for non-cached nodes (only if they have embedding data)
+            if "_func_data" in node:
+                # Generate function embedding
+                func_data = node.pop("_func_data")  # Remove temp data
+                try:
+                    embedding_service = self._get_embedding_service()
+                    logger.info(f"Generating embedding for function '{func_data['name']}' with signature={func_data['signature']}, docstring={func_data['docstring']}")
+                    embedding = embedding_service.generate_function_embedding(
+                        name=func_data["name"],
+                        signature=func_data["signature"],
+                        docstring=func_data["docstring"]
+                    )
+                    if embedding is not None and len(embedding) > 0:
+                        try:
+                            if isinstance(embedding, np.ndarray):
+                                embedding_f32 = embedding.astype(np.float32)
+                                embedding_list = [float(x) for x in embedding_f32.tolist()]
+                            elif isinstance(embedding, list):
+                                embedding_list = [float(x) for x in embedding]
+                            else:
+                                embedding_list = [float(x) for x in list(embedding)]
+                            
+                            if len(embedding_list) == EmbeddingService.EMBEDDING_DIMENSION and all(
+                                isinstance(x, float) and not (np.isnan(x) or np.isinf(x)) 
+                                for x in embedding_list
+                            ):
+                                node["Function.embedding"] = embedding_list
+                                logger.info(f"Successfully generated embedding for function '{func_data['name']}' (dimension: {len(embedding_list)})")
+                            else:
+                                logger.warning(f"Invalid embedding for function '{func_data['name']}': dimension={len(embedding_list)}, expected={EmbeddingService.EMBEDDING_DIMENSION}")
+                        except Exception as e:
+                            logger.warning(f"Failed to format embedding for function '{func_data['name']}': {e}")
+                    else:
+                        logger.warning(f"Generated empty or None embedding for function '{func_data['name']}'")
+                except Exception as e:
+                    logger.warning(f"Failed to generate embedding for function '{func_data['name']}': {e}", exc_info=True)
+            
+            elif "_cls_data" in node:
+                # Generate class embedding
+                cls_data = node.pop("_cls_data")  # Remove temp data
+                try:
+                    embedding_service = self._get_embedding_service()
+                    logger.info(f"Generating embedding for class '{cls_data['name']}' with methods={cls_data['methods']}")
+                    embedding = embedding_service.generate_class_embedding(
+                        name=cls_data["name"],
+                        methods=cls_data["methods"]
+                    )
+                    if embedding is not None and len(embedding) > 0:
+                        try:
+                            if isinstance(embedding, np.ndarray):
+                                embedding_f32 = embedding.astype(np.float32)
+                                embedding_list = [float(x) for x in embedding_f32.tolist()]
+                            elif isinstance(embedding, list):
+                                embedding_list = [float(x) for x in embedding]
+                            else:
+                                embedding_list = [float(x) for x in list(embedding)]
+                            
+                            if len(embedding_list) == EmbeddingService.EMBEDDING_DIMENSION and all(
+                                isinstance(x, float) and not (np.isnan(x) or np.isinf(x)) 
+                                for x in embedding_list
+                            ):
+                                node["Class.embedding"] = embedding_list
+                                logger.info(f"Successfully generated embedding for class '{cls_data['name']}' (dimension: {len(embedding_list)})")
+                            else:
+                                logger.warning(f"Invalid embedding for class '{cls_data['name']}': dimension={len(embedding_list)}, expected={EmbeddingService.EMBEDDING_DIMENSION}")
+                        except Exception as e:
+                            logger.warning(f"Failed to format embedding for class '{cls_data['name']}': {e}")
+                    else:
+                        logger.warning(f"Generated empty or None embedding for class '{cls_data['name']}'")
+                except Exception as e:
+                    logger.warning(f"Failed to generate embedding for class '{cls_data['name']}': {e}", exc_info=True)
+            
+            elif "_struct_data" in node:
+                # Generate struct embedding
+                struct_data = node.pop("_struct_data")  # Remove temp data
+                try:
+                    embedding_service = self._get_embedding_service()
+                    logger.info(f"Generating embedding for struct '{struct_data['name']}' with fields={struct_data['fields']}")
+                    embedding = embedding_service.generate_struct_embedding(
+                        name=struct_data["name"],
+                        fields=struct_data["fields"]
+                    )
+                    if embedding is not None and len(embedding) > 0:
+                        try:
+                            if isinstance(embedding, np.ndarray):
+                                embedding_f32 = embedding.astype(np.float32)
+                                embedding_list = [float(x) for x in embedding_f32.tolist()]
+                            elif isinstance(embedding, list):
+                                embedding_list = [float(x) for x in embedding]
+                            else:
+                                embedding_list = [float(x) for x in list(embedding)]
+                            
+                            if len(embedding_list) == EmbeddingService.EMBEDDING_DIMENSION and all(
+                                isinstance(x, float) and not (np.isnan(x) or np.isinf(x)) 
+                                for x in embedding_list
+                            ):
+                                node["Struct.embedding"] = embedding_list
+                                logger.info(f"Successfully generated embedding for struct '{struct_data['name']}' (dimension: {len(embedding_list)})")
+                            else:
+                                logger.warning(f"Invalid embedding for struct '{struct_data['name']}': dimension={len(embedding_list)}, expected={EmbeddingService.EMBEDDING_DIMENSION}")
+                        except Exception as e:
+                            logger.warning(f"Error processing embedding for struct '{struct_data['name']}': {e}")
+                    else:
+                        logger.warning(f"Generated empty or None embedding for struct '{struct_data['name']}'")
+                except Exception as e:
+                    logger.warning(f"Failed to generate embedding for struct '{struct_data['name']}': {e}", exc_info=True)
+            
+            # Add hash to cache for nodes that passed the check (new or changed)
+            if hash_cache and not should_skip:
+                node_hash = calculate_node_hash_from_dgraph_node(node)
+                if node_hash:
+                    hash_cache.add_hash(node_hash)
+            
+            nodes_to_insert.append(node)
+            cache_stats["inserted"] += 1
+        
         # Keep blank nodes as-is - Dgraph will resolve them within the transaction
         # For files, use upsert to ensure we update existing nodes instead of creating duplicates
         # This is handled by the @upsert directive on file.path in the schema
@@ -990,7 +1129,9 @@ class DgraphClient:
         # IMPORTANT: For vectors in Dgraph, the list must be a proper Python list
         # and pydgraph's set_obj should preserve it correctly
         valid_nodes = []
-        for node in nodes:
+        for node in nodes_to_insert:
+            # All hash checking and embedding generation already done above
+            # Just validate embedding format here
             # Check if node has embedding fields and validate them
             if "Function.embedding" in node:
                 emb = node["Function.embedding"]
@@ -1045,6 +1186,15 @@ class DgraphClient:
                     del node["Struct.embedding"]
             valid_nodes.append(node)
         
+        # Update inserted count to reflect actual nodes being inserted (after filtering)
+        # This overwrites the per-node increment to account for nodes filtered due to invalid embeddings
+        actual_inserted = len(valid_nodes)
+        if hash_cache:
+            cache_stats["inserted"] = actual_inserted
+        else:
+            # If no hash cache, we still need to track inserted count
+            cache_stats["inserted"] = actual_inserted
+        
         batch_size = 1000
         max_retries = 3
         retry_delay = 0.5  # Delay for "not ready" retries
@@ -1054,7 +1204,9 @@ class DgraphClient:
             
             # Debug: Dump batch to JSON file to inspect vector format
             try:
-                debug_file = Path(__file__).parent.parent.parent / "graph.json"
+                from pathlib import Path
+                from ..graph.workspace_metadata import get_user_badger_dir
+                debug_file = get_user_badger_dir() / "graph.json"
                 with open(debug_file, 'w') as f:
                     json.dump(batch, f, indent=2, default=str)
                 logger.info(f"Debug: Dumped batch {i//batch_size + 1} to {debug_file} ({len(batch)} nodes)")
@@ -1204,11 +1356,26 @@ class DgraphClient:
         
         # Save hash cache if provided
         if hash_cache:
+            initial_cache_size = hash_cache.get_cache_size() - cache_stats["inserted"]  # Size before adding new hashes
+            new_hashes_added = cache_stats["inserted"]
+            logger.info(f"Saving hash cache: {hash_cache.get_cache_size()} hashes (added {new_hashes_added} new hashes this run)")
             hash_cache.save_cache()
-            if cache_stats["skipped"] > 0:
+            
+            # Log statistics
+            if cache_stats["total_checked"] > 0:
+                hit_rate = (cache_stats["hits"] / cache_stats["total_checked"]) * 100
+                logger.info(
+                    f"Hash cache statistics: {cache_stats['hits']} hits, {cache_stats['misses']} misses "
+                    f"({hit_rate:.1f}% hit rate). Skipped {cache_stats['skipped']} nodes, inserted {cache_stats['inserted']} nodes."
+                )
+            else:
                 logger.info(f"Hash cache: skipped {cache_stats['skipped']} unchanged nodes, inserted {cache_stats['inserted']} new/updated nodes")
         
-        logger.info(f"Successfully inserted {len(nodes)} nodes into Dgraph")
+        # Log accurate insertion count
+        if cache_stats["inserted"] > 0:
+            logger.info(f"Successfully inserted {cache_stats['inserted']} nodes into Dgraph")
+        else:
+            logger.info("No new or updated nodes to insert (all nodes were cached)")
         return True
     
     def query_context(self, query_elements: Dict[str, List[str]]) -> Dict[str, Any]:

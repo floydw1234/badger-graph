@@ -176,7 +176,7 @@ class EmbeddingService:
         name: str,
         fields: Optional[List[str]] = None
     ) -> List[float]:
-        """Generate embedding for a struct.
+        """Generate embedding for a struct (C/C++).
         
         Args:
             name: Struct name

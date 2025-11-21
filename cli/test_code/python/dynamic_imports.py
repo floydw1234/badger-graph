@@ -22,7 +22,7 @@ except ImportError:
     get = None
     post = None
 
-# Import aliases
+# Import aliases yayay
 import json as json_module
 from os import path as os_path
 from os.path import join as path_join, exists as path_exists

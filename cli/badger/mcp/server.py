@@ -7,10 +7,14 @@ import sys
 from typing import Any, Optional, Sequence
 
 from toon_py import encode
+from pathlib import Path
 from ..graph.dgraph import DgraphClient
-from ..graph.indexer import index_workspace
+from ..graph.indexer import index_and_build_graph
+from ..graph.workspace_metadata import load_workspace_path
+from ..graph.hash_cache import HashCache
 from ..embeddings.service import EmbeddingService
 from .config import MCPServerConfig
+from .file_watcher import FileWatcher
 from . import tools
 
 logger = logging.getLogger(__name__)
@@ -242,7 +246,8 @@ async def run_mcp_server(
     dgraph_endpoint: Optional[str] = None,
     workspace_path: Optional[str] = None,
     config: Optional[MCPServerConfig] = None,
-    auto_index: bool = False
+    auto_index: bool = False,
+    watch: bool = False
 ) -> None:
     """Run MCP server with stdio transport.
     
@@ -251,7 +256,11 @@ async def run_mcp_server(
         workspace_path: Path to workspace/codebase root (optional, uses cwd or env var)
         config: MCP server configuration (optional)
         auto_index: If True, automatically index the workspace on startup (default: False)
+        watch: If True, watch for file changes and auto-update graph (default: False)
     """
+    # Initialize file_watcher to None at function scope to avoid UnboundLocalError
+    file_watcher: Optional[FileWatcher] = None
+    
     try:
         # Initialize configuration
         if config is None:
@@ -260,10 +269,51 @@ async def run_mcp_server(
                 workspace_path=workspace_path
             )
         
-        # Initialize Dgraph client
+        # Initialize Dgraph client first (needed for validation checks)
         logger.info(f"Connecting to Dgraph at {config.dgraph_endpoint}")
-        logger.info(f"Using workspace: {config.workspace_path}")
         dgraph_client = DgraphClient(config.dgraph_endpoint)
+        
+        # Load workspace path from metadata if watching
+        actual_workspace_path = Path(config.workspace_path)
+        if watch:
+            stored_workspace = load_workspace_path(actual_workspace_path)
+            if stored_workspace:
+                actual_workspace_path = stored_workspace
+                logger.info(f"Using stored workspace path: {actual_workspace_path}")
+            else:
+                logger.error(f"No indexed workspace found. Cannot start file watcher.")
+                logger.error(f"Please run 'badger index' first to index a workspace.")
+                logger.error(f"File watching requires an indexed workspace.")
+                raise ValueError(
+                    "File watching requires an indexed workspace. "
+                    "Run 'badger index' first to index your workspace."
+                )
+            
+            # Check if graph has any data
+            try:
+                # Quick check: query for any files
+                check_query = "query { files: queryFile(first: 1) { id } }"
+                result = dgraph_client.execute_graphql_query(check_query)
+                file_count = len(result.get("files", []))
+                
+                if file_count == 0:
+                    logger.error("Graph database is empty. Cannot start file watcher.")
+                    logger.error("Please run 'badger index' first to index your workspace.")
+                    raise ValueError(
+                        "Graph database is empty. "
+                        "Run 'badger index' first to index your workspace before starting file watcher."
+                    )
+                else:
+                    logger.info(f"Graph database contains data ({file_count}+ files found)")
+            except Exception as e:
+                logger.error(f"Failed to verify graph has data: {e}")
+                logger.error("File watcher requires an indexed workspace with data in the graph.")
+                raise ValueError(
+                    "Cannot verify graph has data. "
+                    "Run 'badger index' first to index your workspace."
+                ) from e
+        
+        logger.info(f"Using workspace: {actual_workspace_path}")
         
         # Validate connection
         try:
@@ -275,28 +325,149 @@ async def run_mcp_server(
             logger.warning(f"Dgraph connection validation failed: {e}")
             logger.warning("Continuing anyway - connection may work at runtime")
         
-        # Auto-index workspace if requested
-        if auto_index:
-            logger.info("Auto-indexing workspace...")
-            try:
-                parse_results, graph_data = index_workspace(
-                    config.workspace_path,
-                    dgraph_client,
-                    language=None,  # Auto-detect
-                    auto_index=True,
-                    strict_validation=True  # Default to strict for MCP server
-                )
-                if parse_results:
-                    logger.info(f"Workspace indexed successfully: {len(parse_results)} files")
-                else:
-                    logger.warning("No files found to index")
-            except Exception as e:
-                logger.error(f"Failed to auto-index workspace: {e}", exc_info=True)
-                logger.warning("Continuing with MCP server startup - you may need to index manually")
-        
         # Initialize embedding service
         logger.info("Initializing embedding service")
         embedding_service = EmbeddingService()
+        
+        # Setup file watcher if requested (will be started after we enter async context)
+        if watch:
+            async def handle_file_changes(changed_files: set[Path]):
+                """Handle file changes by re-indexing workspace."""
+                logger.info(f"File changes detected: {len(changed_files)} files")
+                
+                # Separate deleted files from modified/new files
+                deleted_files = [f for f in changed_files if not f.exists()]
+                modified_or_new_files = [f for f in changed_files if f.exists()]
+                
+                # Handle deleted files first
+                if deleted_files:
+                    logger.info(f"Handling {len(deleted_files)} deleted files")
+                    await handle_file_deletions(dgraph_client, deleted_files)
+                
+                # Re-index entire workspace (fast with tree-sitter)
+                # This handles:
+                # - New files: will be found and indexed
+                # - Modified files: will be re-parsed, hash cache will skip unchanged nodes
+                # - Deleted files: won't be found (they don't exist), so won't be in parse results
+                try:
+                    logger.info("Re-indexing workspace after file changes...")
+                    parse_results, graph_data = index_and_build_graph(
+                        actual_workspace_path,
+                        language=None,  # Auto-detect
+                        verbose=False
+                    )
+                    
+                    if parse_results:
+                        # Initialize hash cache from user-level location
+                        from ..graph.hash_cache import get_user_hash_cache_path
+                        cache_file = get_user_hash_cache_path()
+                        hash_cache = HashCache(cache_file)
+                        
+                        # Insert graph (hash cache will filter out unchanged nodes)
+                        # For new files: nodes will be inserted (not in cache)
+                        # For modified files: only changed nodes will be inserted (hash cache filters unchanged)
+                        # For deleted files: already removed from graph, won't be in parse_results
+                        if dgraph_client.insert_graph(graph_data, strict_validation=True, hash_cache=hash_cache):
+                            logger.info(f"Successfully updated graph: {len(parse_results)} files indexed")
+                            if deleted_files:
+                                logger.info(f"Deleted files removed from graph: {len(deleted_files)} files")
+                            if modified_or_new_files:
+                                logger.info(f"Modified/new files processed: {len(modified_or_new_files)} files")
+                        else:
+                            logger.error("Failed to update graph database")
+                    else:
+                        # No files found - could mean all files were deleted
+                        if deleted_files and not modified_or_new_files:
+                            logger.info(f"All changed files were deletions. Graph updated.")
+                        else:
+                            logger.warning("No files found to index")
+                except Exception as e:
+                    logger.error(f"Error re-indexing workspace: {e}", exc_info=True)
+            
+            async def handle_file_deletions(client: DgraphClient, deleted_files: list[Path]):
+                """Remove nodes from deleted files from the graph."""
+                import pydgraph
+                
+                for deleted_file in deleted_files:
+                    try:
+                        # Query for file node and all related nodes
+                        file_path_str = str(deleted_file.resolve())
+                        escaped_path = file_path_str.replace('"', '\\"')
+                        
+                        # Use DQL to find file and all nodes it contains
+                        dql_query = f"""
+                        {{
+                            files(func: eq(File.path, "{escaped_path}")) {{
+                                uid
+                                File.path
+                                File.containsFunction {{
+                                    uid
+                                }}
+                                File.containsClass {{
+                                    uid
+                                }}
+                                File.containsStruct {{
+                                    uid
+                                }}
+                                File.containsImport {{
+                                    uid
+                                }}
+                                File.containsMacro {{
+                                    uid
+                                }}
+                                File.containsVariable {{
+                                    uid
+                                }}
+                                File.containsTypedef {{
+                                    uid
+                                }}
+                                File.containsStructFieldAccess {{
+                                    uid
+                                }}
+                            }}
+                        }}
+                        """
+                        
+                        txn = client.client.txn()
+                        try:
+                            result = txn.query(dql_query)
+                            data = json.loads(result.json)
+                            files = data.get("files", [])
+                            
+                            if files:
+                                file_node = files[0]
+                                file_uid = file_node.get("uid")
+                                
+                                # Collect all UIDs to delete
+                                uids_to_delete = [file_uid]
+                                
+                                # Add all contained nodes
+                                for rel_type in ["File.containsFunction", "File.containsClass", "File.containsStruct",
+                                                "File.containsImport", "File.containsMacro", "File.containsVariable",
+                                                "File.containsTypedef", "File.containsStructFieldAccess"]:
+                                    contained = file_node.get(rel_type, [])
+                                    for node in contained:
+                                        if "uid" in node:
+                                            uids_to_delete.append(node["uid"])
+                                
+                                # Delete all nodes
+                                if uids_to_delete:
+                                    delete_data = [{"uid": uid} for uid in uids_to_delete]
+                                    delete_mutation = txn.create_mutation(del_obj=delete_data)
+                                    txn.mutate(delete_mutation)
+                                    txn.commit()
+                                    logger.info(f"Deleted {len(uids_to_delete)} nodes for file: {file_path_str}")
+                            else:
+                                logger.debug(f"File not found in graph: {file_path_str}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete nodes for {file_path_str}: {e}")
+                            txn.discard()
+                    except Exception as e:
+                        logger.warning(f"Error handling deletion of {deleted_file}: {e}")
+            
+            # Store callback and workspace for later (will start watcher in async context)
+            file_watcher_callback = handle_file_changes
+            file_watcher_workspace = actual_workspace_path
         
         # Create server
         logger.info("Creating MCP server")
@@ -317,17 +488,38 @@ async def run_mcp_server(
         
         # Run server with stdio transport
         logger.info("Starting MCP server with stdio transport")
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options()
-            )
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                # Start file watcher now that we're in async context
+                if watch:
+                    event_loop = asyncio.get_running_loop()
+                    file_watcher = FileWatcher(
+                        file_watcher_workspace,
+                        file_watcher_callback,
+                        debounce_seconds=10.0,
+                        event_loop=event_loop
+                    )
+                    file_watcher.start()
+                    logger.info(f"File watcher started for workspace: {file_watcher_workspace}")
+                
+                await server.run(
+                    read_stream,
+                    write_stream,
+                    server.create_initialization_options()
+                )
+        finally:
+            # Stop file watcher on shutdown
+            if file_watcher:
+                file_watcher.stop()
     
     except KeyboardInterrupt:
         logger.info("Server shutdown requested")
+        if file_watcher:
+            file_watcher.stop()
     except Exception as e:
         logger.error(f"Server error: {e}", exc_info=True)
+        if file_watcher:
+            file_watcher.stop()
         sys.exit(1)
 
 
