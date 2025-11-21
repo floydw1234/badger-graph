@@ -38,7 +38,24 @@ def find_source_files(
         List of source file paths
     """
     if exclude_patterns is None:
-        exclude_patterns = ["**/node_modules/**", "**/.git/**", "**/__pycache__/**", "**/.badger-index/**"]
+        exclude_patterns = [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/__pycache__/**",
+            "**/.badger-index/**",
+            "build/**",
+            "Build/**",
+            "BUILD/**",
+            "cmake-build-*/**",
+            "**/build/**",
+            "**/Build/**",
+            "**/BUILD/**",
+            "**/cmake-build-*/**",
+            "out/**",
+            "**/out/**",
+            ".vs/**",
+            ".vscode/**"
+        ]
     
     source_files = []
     

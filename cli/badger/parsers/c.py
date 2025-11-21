@@ -497,7 +497,10 @@ class CParser(BaseParser):
         def walk_tree(n):
             # C preprocessor includes
             if n.type == "preproc_include":
-                imports.append(extract_include_info(n))
+                imp = extract_include_info(n)
+                # Filter out system includes (standard library)
+                if imp and "system" not in imp.imported_items:
+                    imports.append(imp)
             
             for i in range(n.child_count):
                 walk_tree(n.child(i))

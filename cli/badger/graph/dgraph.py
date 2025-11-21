@@ -247,14 +247,13 @@ class DgraphClient:
             logger.error(f"Traceback: {traceback.format_exc()}")
             return {}
     
-    def insert_graph(self, graph_data: GraphData, strict_validation: bool = True, hash_cache: Optional[HashCache] = None) -> bool:
+    def insert_graph(self, graph_data: GraphData, strict_validation: bool = True) -> bool:
         """Insert graph data into Dgraph.
         
         Args:
             graph_data: Graph data to insert
             strict_validation: If True, raise exceptions on validation failures.
                              If False (default), skip invalid nodes with warnings.
-            hash_cache: Optional hash cache for incremental indexing
         
         Returns:
             True if successful, False otherwise
@@ -286,18 +285,6 @@ class DgraphClient:
         
         # Create File nodes
         for file_data in graph_data.files:
-            # Check hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("File", file_data)
-                if hash_cache.has_hash(node_hash):
-                    cache_stats["skipped"] += 1
-                    # Still need to track the file UID for relationships
-                    file_path = file_data.get("path", "")
-                    if file_path:
-                        file_uid = self._generate_uid(file_path)
-                        file_uids[file_path] = file_uid
-                    continue
-            
             file_node = create_file_node(file_data)
             if not file_node:
                 validation_failures.append(("File", file_data.get("path", "unknown")))
@@ -313,26 +300,8 @@ class DgraphClient:
             nodes.append(node)
             cache_stats["inserted"] += 1
             
-            # Add to hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("File", file_data)
-                hash_cache.add_hash(node_hash)
-        
         # Create Function nodes
         for func_data in graph_data.functions:
-            # Check hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Function", func_data)
-                if hash_cache.has_hash(node_hash):
-                    cache_stats["skipped"] += 1
-                    # Still need to track the function UID for relationships
-                    func_name = func_data.get("name", "")
-                    func_file = func_data.get("file", "")
-                    if func_name and func_file:
-                        func_uid = self._generate_uid(f"{func_name}@{func_file}")
-                        function_uids[(func_name, func_file)] = func_uid
-                    continue
-            
             func_node = create_function_node(func_data)
             if not func_node:
                 validation_failures.append(("Function", func_data.get("name", "unknown"), func_data.get("file", "unknown")))
@@ -394,26 +363,8 @@ class DgraphClient:
             nodes.append(node)
             cache_stats["inserted"] += 1
             
-            # Add to hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Function", func_data)
-                hash_cache.add_hash(node_hash)
-        
         # Create Class nodes
         for cls_data in graph_data.classes:
-            # Check hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Class", cls_data)
-                if hash_cache.has_hash(node_hash):
-                    cache_stats["skipped"] += 1
-                    # Still need to track the class UID for relationships
-                    cls_name = cls_data.get("name", "")
-                    cls_file = cls_data.get("file", "")
-                    if cls_name and cls_file:
-                        cls_uid = self._generate_uid(f"{cls_name}@{cls_file}")
-                        class_uids[(cls_name, cls_file)] = cls_uid
-                    continue
-            
             cls_node = create_class_node(cls_data)
             if not cls_node:
                 validation_failures.append(("Class", cls_data.get("name", "unknown"), cls_data.get("file", "unknown")))
@@ -470,27 +421,8 @@ class DgraphClient:
             nodes.append(node)
             cache_stats["inserted"] += 1
             
-            # Add to hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Class", cls_data)
-                hash_cache.add_hash(node_hash)
-        
         # Create Import nodes
         for imp_data in graph_data.imports:
-            # Check hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Import", imp_data)
-                if hash_cache.has_hash(node_hash):
-                    cache_stats["skipped"] += 1
-                    # Still need to track the import UID for relationships
-                    imp_module = imp_data.get("module", "")
-                    imp_file = imp_data.get("file", "")
-                    imp_line = imp_data.get("line", 0)
-                    if imp_module and imp_file:
-                        imp_uid = self._generate_uid(f"{imp_module}@{imp_file}@{imp_line}")
-                        import_uids[(imp_module, imp_file, imp_line)] = imp_uid
-                    continue
-            
             imp_node = create_import_node(imp_data)
             if not imp_node:
                 validation_failures.append(("Import", imp_data.get("module", "unknown"), imp_data.get("file", "unknown")))
@@ -508,27 +440,8 @@ class DgraphClient:
             nodes.append(node)
             cache_stats["inserted"] += 1
             
-            # Add to hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Import", imp_data)
-                hash_cache.add_hash(node_hash)
-        
         # Create Macro nodes
         for macro_data in graph_data.macros:
-            # Check hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Macro", macro_data)
-                if hash_cache.has_hash(node_hash):
-                    cache_stats["skipped"] += 1
-                    # Still need to track the macro UID for relationships
-                    macro_name = macro_data.get("name", "")
-                    macro_file = macro_data.get("file", "")
-                    macro_line = macro_data.get("line", 0)
-                    if macro_name and macro_file:
-                        macro_uid = self._generate_uid(f"{macro_name}@{macro_file}@{macro_line}")
-                        macro_uids[(macro_name, macro_file, macro_line)] = macro_uid
-                    continue
-            
             macro_node = create_macro_node(macro_data)
             if not macro_node:
                 validation_failures.append(("Macro", macro_data.get("name", "unknown"), macro_data.get("file", "unknown")))
@@ -546,27 +459,8 @@ class DgraphClient:
             nodes.append(node)
             cache_stats["inserted"] += 1
             
-            # Add to hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Macro", macro_data)
-                hash_cache.add_hash(node_hash)
-        
         # Create Variable nodes
         for var_data in graph_data.variables:
-            # Check hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Variable", var_data)
-                if hash_cache.has_hash(node_hash):
-                    cache_stats["skipped"] += 1
-                    # Still need to track the variable UID for relationships
-                    var_name = var_data.get("name", "")
-                    var_file = var_data.get("file", "")
-                    var_line = var_data.get("line", 0)
-                    if var_name and var_file:
-                        var_uid = self._generate_uid(f"{var_name}@{var_file}@{var_line}")
-                        variable_uids[(var_name, var_file, var_line)] = var_uid
-                    continue
-            
             var_node = create_variable_node(var_data)
             if not var_node:
                 validation_failures.append(("Variable", var_data.get("name", "unknown"), var_data.get("file", "unknown")))
@@ -584,27 +478,8 @@ class DgraphClient:
             nodes.append(node)
             cache_stats["inserted"] += 1
             
-            # Add to hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Variable", var_data)
-                hash_cache.add_hash(node_hash)
-        
         # Create Typedef nodes
         for tdef_data in graph_data.typedefs:
-            # Check hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Typedef", tdef_data)
-                if hash_cache.has_hash(node_hash):
-                    cache_stats["skipped"] += 1
-                    # Still need to track the typedef UID for relationships
-                    tdef_name = tdef_data.get("name", "")
-                    tdef_file = tdef_data.get("file", "")
-                    tdef_line = tdef_data.get("line", 0)
-                    if tdef_name and tdef_file:
-                        tdef_uid = self._generate_uid(f"{tdef_name}@{tdef_file}@{tdef_line}")
-                        typedef_uids[(tdef_name, tdef_file, tdef_line)] = tdef_uid
-                    continue
-            
             tdef_node = create_typedef_node(tdef_data)
             if not tdef_node:
                 validation_failures.append(("Typedef", tdef_data.get("name", "unknown"), tdef_data.get("file", "unknown")))
@@ -622,28 +497,8 @@ class DgraphClient:
             nodes.append(node)
             cache_stats["inserted"] += 1
             
-            # Add to hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("Typedef", tdef_data)
-                hash_cache.add_hash(node_hash)
-        
         # Create StructFieldAccess nodes
         for sfa_data in graph_data.struct_field_accesses:
-            # Check hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("StructFieldAccess", sfa_data)
-                if hash_cache.has_hash(node_hash):
-                    cache_stats["skipped"] += 1
-                    # Still need to track the struct field access UID for relationships
-                    struct_name = sfa_data.get("struct_name", "")
-                    field_name = sfa_data.get("field_name", "")
-                    sfa_file = sfa_data.get("file", "")
-                    sfa_line = sfa_data.get("line", 0)
-                    if struct_name and field_name and sfa_file:
-                        sfa_uid = self._generate_uid(f"{struct_name}.{field_name}@{sfa_file}@{sfa_line}")
-                        struct_field_access_uids[(struct_name, field_name, sfa_file, sfa_line)] = sfa_uid
-                    continue
-            
             sfa_node = create_struct_field_access_node(sfa_data)
             if not sfa_node:
                 validation_failures.append(("StructFieldAccess", f"{sfa_data.get('struct_name', 'unknown')}.{sfa_data.get('field_name', 'unknown')}", sfa_data.get("file", "unknown")))
@@ -662,11 +517,6 @@ class DgraphClient:
             nodes.append(node)
             cache_stats["inserted"] += 1
             
-            # Add to hash cache
-            if hash_cache:
-                node_hash = calculate_node_hash("StructFieldAccess", sfa_data)
-                hash_cache.add_hash(node_hash)
-        
         # Create sets of UIDs that are actually being inserted (not skipped)
         # This prevents creating relationships to nodes that don't exist in the current mutation
         inserted_function_uids = {node.get("uid", "").replace("_:", "") for node in nodes if node.get("dgraph.type") == "Function"}

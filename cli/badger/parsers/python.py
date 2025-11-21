@@ -4,6 +4,42 @@ from pathlib import Path
 from tree_sitter import Language, Parser
 from .base import BaseParser, ParseResult, Function, Class, Import, Position, FunctionCall
 
+# Python standard library modules (top-level)
+# This list covers common stdlib modules to filter out
+_PYTHON_STDLIB_MODULES = {
+    'abc', 'aifc', 'argparse', 'array', 'ast', 'asyncio', 'atexit', 'audioop',
+    'base64', 'bdb', 'binascii', 'binhex', 'bisect', 'builtins', 'bz2',
+    'calendar', 'cgi', 'cgitb', 'chunk', 'cmath', 'cmd', 'code', 'codecs',
+    'codeop', 'collections', 'colorsys', 'compileall', 'concurrent', 'configparser',
+    'contextlib', 'copy', 'copyreg', 'cProfile', 'crypt', 'csv', 'ctypes',
+    'curses', 'dataclasses', 'datetime', 'dbm', 'decimal', 'difflib', 'dis',
+    'distutils', 'doctest', 'dummy_threading', 'email', 'encodings', 'ensurepip',
+    'enum', 'errno', 'faulthandler', 'fcntl', 'filecmp', 'fileinput', 'fnmatch',
+    'fractions', 'ftplib', 'functools', 'gc', 'getopt', 'getpass', 'gettext',
+    'glob', 'graphlib', 'grp', 'gzip', 'hashlib', 'heapq', 'hmac', 'html',
+    'http', 'idlelib', 'imaplib', 'imghdr', 'imp', 'importlib', 'inspect',
+    'io', 'ipaddress', 'itertools', 'json', 'keyword', 'lib2to3', 'linecache',
+    'locale', 'logging', 'lzma', 'mailbox', 'mailcap', 'marshal', 'math',
+    'mimetypes', 'mmap', 'modulefinder', 'msilib', 'msvcrt', 'multiprocessing',
+    'netrc', 'nis', 'nntplib', 'ntpath', 'nturl2path', 'numbers', 'operator',
+    'optparse', 'os', 'ossaudiodev', 'pathlib', 'pdb', 'pickle', 'pickletools',
+    'pipes', 'pkgutil', 'platform', 'plistlib', 'poplib', 'posix', 'posixpath',
+    'pprint', 'profile', 'pstats', 'pty', 'pwd', 'py_compile', 'pyclbr',
+    'pydoc', 'queue', 'quopri', 'random', 're', 'readline', 'reprlib',
+    'resource', 'rlcompleter', 'runpy', 'sched', 'secrets', 'select',
+    'selectors', 'shelve', 'shlex', 'shutil', 'signal', 'site', 'smtplib',
+    'sndhdr', 'socket', 'socketserver', 'spwd', 'sqlite3', 'sre_compile',
+    'sre_constants', 'sre_parse', 'ssl', 'stat', 'statistics', 'string',
+    'stringprep', 'struct', 'subprocess', 'sunau', 'symbol', 'symtable',
+    'sys', 'sysconfig', 'syslog', 'tarfile', 'telnetlib', 'tempfile', 'termios',
+    'test', 'textwrap', 'threading', 'time', 'timeit', 'tkinter', 'token',
+    'tokenize', 'trace', 'traceback', 'tracemalloc', 'tty', 'turtle', 'types',
+    'typing', 'unicodedata', 'unittest', 'urllib', 'uu', 'uuid', 'venv',
+    'warnings', 'wave', 'weakref', 'webbrowser', 'winreg', 'winsound',
+    'wsgiref', 'xdrlib', 'xml', 'xmlrpc', 'zipapp', 'zipfile', 'zipimport',
+    'zlib'
+}
+
 
 class PythonParser(BaseParser):
     """Parser for Python source files."""
@@ -383,11 +419,25 @@ class PythonParser(BaseParser):
                 alias=alias
             )
         
+        def is_stdlib_module(module: str) -> bool:
+            """Check if a module is part of Python standard library."""
+            if not module:
+                return False
+            # Get the top-level module name (first part of dotted name)
+            top_level = module.split('.')[0]
+            return top_level in _PYTHON_STDLIB_MODULES
+        
         def walk_tree(n):
             if n.type == "import_statement":
-                imports.append(extract_import_statement(n))
+                imp = extract_import_statement(n)
+                # Filter out standard library imports
+                if imp and imp.module and not is_stdlib_module(imp.module):
+                    imports.append(imp)
             elif n.type == "import_from_statement":
-                imports.append(extract_import_from_statement(n))
+                imp = extract_import_from_statement(n)
+                # Filter out standard library imports
+                if imp and imp.module and not is_stdlib_module(imp.module):
+                    imports.append(imp)
             
             for i in range(n.child_count):
                 walk_tree(n.child(i))

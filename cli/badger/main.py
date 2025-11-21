@@ -172,15 +172,7 @@ def index_directory(
     if dgraph_client:
         console.print("[dim]Updating graph database...[/dim]")
         try:
-            # Initialize hash cache for incremental indexing
-            from .graph.hash_cache import HashCache
-            cache_file = output_dir / "node_hashes.json"
-            hash_cache = HashCache(cache_file)
-            
-            if hash_cache.get_cache_size() > 0:
-                console.print(f"[dim]Hash cache: {hash_cache.get_cache_size()} nodes cached[/dim]")
-            
-            if dgraph_client.insert_graph(graph_data, strict_validation=strict_validation, hash_cache=hash_cache):
+            if dgraph_client.insert_graph(graph_data, strict_validation=strict_validation):
                 console.print("[green]✓ Graph database updated[/green]")
             else:
                 console.print("[yellow]⚠ Graph database update not yet implemented[/yellow]")
