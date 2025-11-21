@@ -3,8 +3,9 @@
 import json
 import logging
 import fnmatch
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional, Set, Tuple
 
 try:
     import numpy as np  # type: ignore
@@ -63,6 +64,11 @@ def _file_path_to_module(file_path: str, workspace_root: str = None) -> str:
 def extract_relative_path(path: str) -> str:
     """Extract relative path component from absolute path.
     
+    Handles various path formats:
+    - /path/to/src/packages/comm/gossipApi.h -> packages/comm/gossipApi.h
+    - /path/to/src/comm/gossipApi.h -> comm/gossipApi.h
+    - /path/to/gossipApi.h -> gossipApi.h
+    
     Args:
         path: Absolute file path
     
@@ -70,12 +76,27 @@ def extract_relative_path(path: str) -> str:
         Relative path component (e.g., "packages/encryption/encryption.h")
     """
     parts = path.split("/")
-    if "packages" in parts:
-        idx = parts.index("packages")
-        return "/".join(parts[idx:])
-    elif "src" in parts:
-        idx = parts.index("src")
-        return "/".join(parts[idx+1:])
+    
+    # Try to find common root markers
+    for marker in ["packages", "src", "include", "lib"]:
+        if marker in parts:
+            idx = parts.index(marker)
+            # For "src", skip it and take everything after
+            # For others like "packages", include the marker
+            if marker == "src":
+                return "/".join(parts[idx+1:])
+            else:
+                return "/".join(parts[idx:])
+    
+    # If no marker found, try to find a reasonable starting point
+    # Look for common directory patterns (comm, validation, sql, etc.)
+    # and return from there
+    common_dirs = {"comm", "validation", "sql", "encryption", "transactions", 
+                   "initialization", "keystore", "signing", "utils", "tests"}
+    for i, part in enumerate(parts):
+        if part in common_dirs:
+            return "/".join(parts[i:])
+    
     # Fallback: return just the filename
     return parts[-1]
 
@@ -435,17 +456,40 @@ async def get_include_dependencies(
     dgraph_client: DgraphClient,
     file_path: str
 ) -> Dict[str, Any]:
-    """Get all files that transitively import this file (Python) or include it (C).
+    """Find all files that include or import the target file (reverse dependencies).
     
-    For Python files, finds files that import the module.
-    For C files, finds files that include the header.
+    This function finds files that DEPEND ON the target file by including/importing it.
+    It does NOT find files that the target file includes/imports.
+    
+    For C/C++ files:
+    - If given a .c file (e.g., "gossipApi.c"), it searches for files that include
+      the corresponding .h file (e.g., "gossipApi.h")
+    - If given a .h file, it searches for files that include that header
+    - Returns transitive dependencies: files that include files that include the target
+    
+    For Python files:
+    - Finds files that import the module (e.g., "from badger.mcp import tools")
+    - Returns transitive dependencies: files that import files that import the target
+    
+    Example:
+        get_include_dependencies("gossipApi.c") returns:
+        - Files that include "gossipApi.h" (e.g., main.c, gossipApi.c itself)
+        - Files that include files that include "gossipApi.h" (transitive)
     
     Args:
         dgraph_client: Dgraph client instance
-        file_path: Path to file
+        file_path: Path to the file to find dependents for
     
     Returns:
-        Dictionary with dependency tree
+        Dictionary with:
+        - "file": The input file path
+        - "dependencies": List of files that include/import this file, each with:
+          - "file": Path to the dependent file
+          - "module": The module/header that was matched
+          - "depth": Depth in the dependency tree (1 = direct, 2+ = transitive)
+          - "reason": Explanation of why this file is included
+        - "count": Total number of dependent files found
+        - "depth": Maximum depth of the dependency tree
     """
     try:
         # Determine if this is a Python file
@@ -503,179 +547,121 @@ async def get_include_dependencies(
             
             logger.debug(f"get_include_dependencies: Searching for modules matching: {target_modules}")
             
+            # Build lookup structures once (performance optimization)
+            # Query all imports once and build module_to_files mapping
+            all_imports_query = """
+            {
+                imports(func: has(Import.module)) {
+                    uid
+                    Import.module
+                    Import.text
+                    Import.file
+                }
+            }
+            """
+            
+            txn = dgraph_client.client.txn(read_only=True)
+            try:
+                result = txn.query(all_imports_query)
+                data = json.loads(result.json)
+            finally:
+                txn.discard()
+            
+            imports = data.get("imports", [])
+            
+            # Build module_to_files lookup: maps Import.module -> list of files that import it
+            module_to_files: Dict[str, List[str]] = defaultdict(list)
+            # Also build filename_to_modules for fuzzy matching
+            filename_to_modules: Dict[str, Set[str]] = defaultdict(set)
+            
+            for imp in imports:
+                if not isinstance(imp, dict):
+                    continue
+                module = imp.get("Import.module", "")
+                file_path = imp.get("Import.file", "")
+                if not module or not file_path:
+                    continue
+                
+                module_to_files[module].append(file_path)
+                filename = module.split("/")[-1]
+                filename_to_modules[filename].add(module)
+            
+            def _module_matches(module: str, target_modules_set: Set[str]) -> Tuple[bool, Optional[str]]:
+                """Check if a module matches any target, returning (matches, matched_target)."""
+                # Exact match
+                if module in target_modules_set:
+                    return True, module
+                
+                # Filename match
+                module_filename = module.split("/")[-1]
+                for target in target_modules_set:
+                    target_filename = target.split("/")[-1]
+                    if module_filename == target_filename:
+                        # If target is just a filename, match any path with that filename
+                        if "/" not in target:
+                            return True, module
+                        # If both have paths, check if they end the same way
+                        if module.endswith("/" + target) or target.endswith("/" + module):
+                            return True, module
+                        # Also check if paths overlap (e.g., "comm/gossipApi.h" matches "packages/comm/gossipApi.h")
+                        module_parts = module.split("/")
+                        target_parts = target.split("/")
+                        if len(module_parts) >= len(target_parts):
+                            if module_parts[-len(target_parts):] == target_parts:
+                                return True, module
+                        if len(target_parts) >= len(module_parts):
+                            if target_parts[-len(module_parts):] == module_parts:
+                                return True, module
+                
+                return False, None
+            
             def find_includers_dql(target_modules_set: Set[str], visited: Set[str], depth: int = 0) -> List[Dict[str, Any]]:
-                """Find files that include any of the target modules using native DQL."""
+                """Find files that include any of the target modules using pre-built lookups."""
                 if depth > 20:
                     return []
                 
                 dependencies = []
+                matched_files = set()
                 
-                # Step 1: Get all files with their Import UIDs
-                files_query = """
-                {
-                    files(func: type(File)) {
-                        uid
-                        File.path
-                        File.containsImport {
-                            uid
-                        }
-                    }
-                }
-                """
-                
-                txn = dgraph_client.client.txn(read_only=True)
-                try:
-                    result = txn.query(files_query)
-                    data = json.loads(result.json)
-                finally:
-                    txn.discard()
-                
-                files = data.get("files", [])
-                
-                # Step 2: Collect all Import UIDs and create a mapping
-                import_uids = set()
-                file_to_import_uids = {}
-                
-                for file_node in files:
-                    file_path_check = file_node.get("File.path", "")
-                    if not file_path_check:
-                        continue
-                    
-                    imports_list = file_node.get("File.containsImport", [])
-                    if not isinstance(imports_list, list):
-                        imports_list = [imports_list] if imports_list else []
-                    
-                    file_import_uids = []
-                    for imp in imports_list:
-                        if isinstance(imp, dict):
-                            imp_uid = imp.get("uid")
-                            if imp_uid:
-                                import_uids.add(imp_uid)
-                                file_import_uids.append(imp_uid)
-                    
-                    if file_import_uids:
-                        file_to_import_uids[file_path_check] = file_import_uids
-                
-                # Step 3: Query Import nodes directly by module instead of by UID
-                # This avoids issues with expand(_all_) when querying by UID from relationships
-                uid_to_import = {}
-                
-                # Query imports that match our target modules
+                # Find all modules that match our targets
+                matching_modules = set()
                 for target_module in target_modules_set:
-                    escaped_module = target_module.replace('"', '\\"')
-                    import_query = f"""
-                    {{
-                        imports(func: eq(Import.module, "{escaped_module}")) {{
-                            uid
-                            Import.module
-                            Import.text
-                            Import.file
-                        }}
-                    }}
-                    """
-                    
-                    txn2 = dgraph_client.client.txn(read_only=True)
-                    try:
-                        result2 = txn2.query(import_query)
-                        data2 = json.loads(result2.json)
-                    finally:
-                        txn2.discard()
-                    
-                    imports = data2.get("imports", [])
-                    for imp in imports:
-                        if isinstance(imp, dict):
-                            uid = imp.get("uid")
-                            if uid:
-                                uid_to_import[uid] = imp
-                
-                # Also query by filename for cases where module is just "encryption.h"
-                target_filenames = {t.split("/")[-1] for t in target_modules_set if "/" in t}
-                for target_filename in target_filenames:
-                    # Query all imports and filter by filename
-                    all_imports_query = """
-                    {
-                        imports(func: has(Import.module)) {
-                            uid
-                            Import.module
-                            Import.text
-                            Import.file
-                        }
-                    }
-                    """
-                    
-                    txn3 = dgraph_client.client.txn(read_only=True)
-                    try:
-                        result3 = txn3.query(all_imports_query)
-                        data3 = json.loads(result3.json)
-                    finally:
-                        txn3.discard()
-                    
-                    imports3 = data3.get("imports", [])
-                    for imp in imports3:
-                        if not isinstance(imp, dict):
-                            continue
-                        module = imp.get("Import.module", "")
-                        if not module or module.split("/")[-1] != target_filename:
-                            continue
-                        # Skip if already matched by exact query
-                        if module in target_modules_set:
-                            continue
-                        uid = imp.get("uid")
-                        if uid:
-                            uid_to_import[uid] = imp
-                
-                # Step 4: Match Import nodes to target modules and get their files
-                # Since we queried by module, all imports in uid_to_import already match
-                for imp_uid, imp in uid_to_import.items():
-                    module = imp.get("Import.module", "")
-                    if not module:
-                        continue
-                    
-                    # Get the file that contains this import
-                    file_path_check = imp.get("Import.file", "")
-                    if not file_path_check or file_path_check in visited:
-                        continue
-                    
-                    # Check if module matches any target (it should, since we queried by target)
-                    matches = False
-                    matched_target = None
-                    
                     # Exact match
-                    if module in target_modules_set:
-                        matches = True
-                        matched_target = module
-                    else:
-                        # Try matching by filename
-                        module_filename = module.split("/")[-1]
-                        for target in target_modules_set:
-                            target_filename = target.split("/")[-1]
-                            if module_filename == target_filename:
-                                # If target is just a filename, match any path with that filename
-                                if "/" not in target:
-                                    matches = True
-                                    matched_target = module
-                                    break
-                                # If both have paths, check if they end the same way
-                                if module.endswith("/" + target) or target.endswith("/" + module):
-                                    matches = True
-                                    matched_target = module
-                                    break
+                    if target_module in module_to_files:
+                        matching_modules.add(target_module)
                     
-                    if matches:
-                        visited.add(file_path_check)
-                        dependencies.append({
-                            "file": file_path_check,
-                            "module": matched_target or module,
-                            "depth": depth + 1,
-                            "reason": f"Includes {matched_target or module}"
-                        })
+                    # Filename match
+                    target_filename = target_module.split("/")[-1]
+                    if target_filename in filename_to_modules:
+                        for module in filename_to_modules[target_filename]:
+                            matches, _ = _module_matches(module, target_modules_set)
+                            if matches:
+                                matching_modules.add(module)
+                
+                # Get all files that import matching modules
+                for module in matching_modules:
+                    files = module_to_files.get(module, [])
+                    for file_path_check in files:
+                        if file_path_check in visited or file_path_check in matched_files:
+                            continue
                         
-                        # Recursively find includers of this file
-                        new_target_modules = {extract_relative_path(file_path_check)}
-                        if file_path_check.endswith(".c"):
-                            h_path = file_path_check[:-2] + ".h"
-                            new_target_modules.add(extract_relative_path(h_path))
-                        dependencies.extend(find_includers_dql(new_target_modules, visited, depth + 1))
+                        matches, matched_target = _module_matches(module, target_modules_set)
+                        if matches:
+                            visited.add(file_path_check)
+                            matched_files.add(file_path_check)
+                            dependencies.append({
+                                "file": file_path_check,
+                                "module": matched_target or module,
+                                "depth": depth + 1,
+                                "reason": f"Includes {matched_target or module}"
+                            })
+                            
+                            # Recursively find includers of this file
+                            new_target_modules = {extract_relative_path(file_path_check)}
+                            if file_path_check.endswith(".c"):
+                                h_path = file_path_check[:-2] + ".h"
+                                new_target_modules.add(extract_relative_path(h_path))
+                            dependencies.extend(find_includers_dql(new_target_modules, visited, depth + 1))
                 
                 return dependencies
             
@@ -973,14 +959,38 @@ async def check_affected_files(
     dgraph_client: DgraphClient,
     changed_files: List[str]
 ) -> Dict[str, Any]:
-    """Given a list of changed files, find all files that might be affected.
+    """Find all files that would be affected if the given files are changed.
+    
+    This function identifies files that need to be recompiled, retested, or reviewed
+    when the specified files are modified. It finds:
+    
+    1. Direct includes: Files that directly include/import the changed files
+       (e.g., if "gossipApi.c" changes, files that include "gossipApi.h" are affected)
+    
+    2. Transitive includes: Files that include files that include the changed files
+       (e.g., if A includes B, and B includes C, then changing C affects both A and B)
+    
+    3. Function calls: Files that call functions defined in the changed files
+       (e.g., if "gossipApi.c" defines a function, files that call it are affected)
+    
+    This is useful for:
+    - Determining test scope when a file changes
+    - Identifying files that need recompilation
+    - Understanding the impact of code changes
     
     Args:
         dgraph_client: Dgraph client instance
-        changed_files: List of file paths
+        changed_files: List of file paths that have been modified
     
     Returns:
-        Dictionary with affected files by type
+        Dictionary with:
+        - "affected_files": Sorted list of all unique affected file paths
+        - "by_type": Dictionary categorizing affected files:
+          - "direct_include": Files that directly include/import changed files
+          - "transitive_include": Files that transitively include changed files
+          - "function_call": Files that call functions from changed files
+        - "count": Total number of unique affected files
+        - "changed_files": The input list of changed files
     """
     try:
         affected_files = set()
